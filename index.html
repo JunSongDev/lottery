@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#080c18">
+<meta name="description" content="双色球 / 大乐透历史开奖数据统计分析、随机性检验与多因子推荐模型">
+<title>彩号分析引擎 · 双色球 / 大乐透</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <header class="hero">
+    <div class="hero-title">
+      <div>
+        <h1>彩号分析引擎</h1>
+        <p class="sub">历史统计 · 随机性检验 · 多因子推理模型</p>
+      </div>
+      <span class="badge" id="data-badge">加载中…</span>
+    </div>
+
+    <div class="kind-switch">
+      <button data-kind="ssq" class="active">双色球</button>
+      <button data-kind="dlt">大乐透</button>
+    </div>
+
+    <div class="latest-card" id="latest"></div>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="recommend" class="active">智能推荐</button>
+    <button data-tab="stats">统计分析</button>
+    <button data-tab="tests">规律检验</button>
+    <button data-tab="backtest">回测验证</button>
+  </nav>
+
+  <main>
+    <section id="panel-recommend" class="panel"></section>
+    <section id="panel-stats" class="panel hidden"></section>
+    <section id="panel-tests" class="panel hidden"></section>
+    <section id="panel-backtest" class="panel hidden"></section>
+  </main>
+
+  <footer class="foot">
+    <p><b>免责声明</b></p>
+    <p>本工具仅用于数据统计与可视化学习，不构成任何投注建议。彩票开奖是独立随机事件，
+    每一注的中奖概率完全相同，历史数据无法预测未来结果。模型中展示的所有"因子"与"权重"
+    都经过了样本外回测，其结论是诚实地呈现"历史数据不具备预测力"。
+    请理性购彩，量力而行，未满 18 周岁禁止购买彩票。</p>
+  </footer>
+</div>
+
+<!-- 二级页所在层：与一级界面（.app）平级，推入时从右侧滑入 -->
+<div class="page-scrim" id="page-scrim" aria-hidden="true"></div>
+<div class="page-layer" id="page-layer" aria-hidden="true"></div>
+
+<script src="js/data-ssq.js"></script>
+<script src="js/data-dlt.js"></script>
+<script src="js/lotto-core.js"></script>
+<script src="js/stats.js"></script>
+<script src="js/tests.js"></script>
+<script src="js/model.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
