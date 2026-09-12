@@ -280,13 +280,54 @@
     return order.map(function (k) { return { key: k, count: map[k], ratio: map[k] / values.length }; });
   }
 
+  /* ---------------- 运行时数据补齐 ---------------- */
+
+  // 用刚刚拉到的官方最新开奖补齐 / 校正内存数据：
+  //   · 期号去重，同一期以传入的（官方）数据为准；
+  //   · 只增不减，本地全量历史不会被覆盖成"最近几期"；
+  //   · 同步刷新 updated / range 元信息，并清空派生缓存（统计、评分都依赖全量数组）。
+  // rows: [{i:'2026106', d:'2026-09-13', r:[2,5,...], b:[7]}]
+  function patchDraws(kind, rows) {
+    var m = meta(kind);
+    var map = {};
+    (m.draws || []).forEach(function (a) { map[a[0]] = a; });
+    var added = 0, fixed = 0;
+    (rows || []).forEach(function (r) {
+      if (!r || r.i == null || !r.r || !r.b) return;
+      var i = String(r.i);
+      var fresh = [i, String(r.d == null ? '' : r.d), r.r.slice(), r.b.slice()];
+      var old = map[i];
+      if (!old) {
+        map[i] = fresh;
+        added++;
+        return;
+      }
+      var sameNums = String(old[2]) === String(fresh[2]) && String(old[3]) === String(fresh[3]);
+      if (sameNums) {
+        if (!old[1] && fresh[1]) { old[1] = fresh[1]; fixed++; }
+        return;
+      }
+      map[i] = fresh;            // 号码不一致：以官方数据为准
+      fixed++;
+    });
+    var arr = Object.keys(map).sort().map(function (k) { return map[k]; });
+    if (arr.length) {
+      m.draws = arr;
+      m.updated = arr[arr.length - 1][1] || m.updated;
+      m.range = arr[0][0] + ' ~ ' + arr[arr.length - 1][0];
+    }
+    delete CACHE[kind];
+    return { added: added, fixed: fixed, total: arr.length };
+  }
+
   root.LC = {
     gammaln: gammaln, gammaP: gammaP, chi2SF: chi2SF,
     normalCDF: normalCDF, normalTwoTail: normalTwoTail,
     comb: comb, hypergeom: hypergeom,
     mean: mean, stdev: stdev, quantile: quantile, pearson: pearson,
     mulberry32: mulberry32,
-    meta: meta, draws: draws, cfg: cfg, mainRange: mainRange, specialRange: specialRange,
+    meta: meta, draws: draws, cfg: cfg, patchDraws: patchDraws,
+    mainRange: mainRange, specialRange: specialRange,
     sum: sum, span: span, oddCount: oddCount, bigCount: bigCount,
     consecutiveCount: consecutiveCount, acValue: acValue, repeatCount: repeatCount,
     tails: tails, zoneIndex: zoneIndex, zoneDistribution: zoneDistribution,

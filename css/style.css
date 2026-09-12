@@ -139,23 +139,17 @@ body.page-pushed .app { will-change: transform; }
   pointer-events: none;
 }
 
-.latest-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.latest-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .latest-issue { font-size: 13px; font-weight: 700; color: #ffd0c8; }
-/* 日期做成可点的胶囊按钮：点它跳到「历史开奖记录」二级页 */
+/* 日期只做展示（不可点），紧跟在期号后面 */
 .latest-date {
-  appearance: none; cursor: pointer; font-family: inherit;
-  display: inline-flex; align-items: center; gap: 3px;
+  display: inline-flex; align-items: center;
   font-size: 12px; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
   padding: 5px 10px; border-radius: 999px;
   background: rgba(255, 255, 255, .06);
   border: 1px solid var(--line);
-  transition: all .18s ease;
 }
-.latest-date .caret {
-  font-style: normal; font-size: 13px; color: var(--text-3);
-  line-height: 1; margin-top: -1px;
-}
-.latest-date:active { transform: scale(.95); background: rgba(255, 255, 255, .14); }
 
 .latest-history-link {
   display: block; width: 100%; margin-top: 12px;
@@ -165,6 +159,34 @@ body.page-pushed .app { will-change: transform; }
   border-top: 1px dashed var(--line);
 }
 .latest-history-link:active { color: #bfdbfe; }
+
+/* 首页加载完成后自动核对最新开奖的状态提示（短暂显示后自动隐藏） */
+.live-note {
+  display: flex; align-items: center; gap: 6px;
+  margin: 10px 2px 0;
+  font-size: 11.5px; color: var(--text-3);
+  transition: opacity .3s ease;
+}
+.live-note b { font-weight: 700; }
+.live-note.syncing { color: var(--text-2); }
+.live-note.ok { color: #6ee7b7; }
+.live-note.fail { color: var(--text-3); }
+.live-note .dot {
+  width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: currentColor; opacity: .85;
+}
+.live-note.syncing .dot { animation: live-blink 1s ease-in-out infinite; }
+@keyframes live-blink { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+.live-note.fading { opacity: 0; }
+.live-note code {
+  background: rgba(0, 0, 0, .35); padding: 1px 5px; border-radius: 5px;
+  font-size: 11px; color: #fff;
+}
+.live-note .live-retry {
+  font: inherit; color: #93c5fd; cursor: pointer;
+  background: none; border: 0; padding: 0 2px; text-decoration: underline;
+}
+.live-note .live-retry:hover { color: #bfdbfe; }
 
 .latest-balls { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 
@@ -807,6 +829,14 @@ body.page-dragging .page-view { transition: none; }
 .ball-luck {
   background: linear-gradient(150deg, #fde68a, #ca8a04);
   box-shadow: 0 4px 12px -4px rgba(202, 138, 4, .8);
+}
+.ball-event {
+  background: linear-gradient(150deg, #7dd3fc, #0369a1);
+  box-shadow: 0 4px 12px -4px rgba(3, 105, 161, .8);
+}
+.ball-self {
+  background: linear-gradient(150deg, #cbd5e1, #475569);
+  box-shadow: 0 4px 12px -4px rgba(71, 85, 105, .8);
 }
 
 .luck-list { display: flex; flex-wrap: wrap; gap: 8px; }

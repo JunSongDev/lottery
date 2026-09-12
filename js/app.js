@@ -21,14 +21,13 @@
     sTuoCount: null,     // 特别区（后区）拖码个数，胆码由官方规则固定为 1 个
     halflife: 30,
     seed: null,
-    // 「避拥挤」出号策略（对应 require.md）
-    strategy: 'crowd',   // crowd 避拥挤出号 / score 多因子评分
-    tierFull: 2,         // 全权重注数
-    tierSqrt: 2,         // 权重开方注数
-    tierUniform: 1,      // 近乎均匀注数
+    // 出号策略固定为「避拥挤」（对应 require.md），不再提供手动切换
+    strategy: 'crowd',
     crowdMax: 60,        // 拥挤度上限，超过者不许输出
     hotPool: '',         // 热门号池（网络 + 手工双来源）
     luck: '',            // 运气源（每行一条，可带日期前缀）
+    events: '',          // E2 实时事件数字（热搜 / 赛事比分 / 胜者编号）
+    selfPick: '',        // P4 历史自买号码（自己以前买过的号）
     cache: {}
   };
 
@@ -44,18 +43,6 @@
     hot: { name: '近期热度', color: '#ef4444', desc: '指数加权移动平均衡量的近期活跃度' },
     transition: { name: '转移关联', color: '#10b981', desc: '与上期开出号码的马尔可夫共现强度' }
   };
-
-  // 推荐策略：默认走「避拥挤」（对应 require.md）
-  var STRATEGY_META = [
-    {
-      v: 'crowd', label: '避拥挤出号',
-      desc: '不预测中奖号码，只避开大众扎堆的号与形态，降低中奖后的奖金分摊'
-    },
-    {
-      v: 'score', label: '多因子评分',
-      desc: '按历史统计因子加权评分排序，回测显示其不具备预测力'
-    }
-  ];
 
   // 组合拥挤度的五个维度（与 crowd.js 的 CROWD_WEIGHTS 一一对应）
   var CROWD_PART_META = {
@@ -107,13 +94,49 @@
   /* ============================================================
    * 顶部：玩法切换 + 最新开奖
    * ========================================================== */
+
+  function fmtTime(ts) {
+    if (!ts) return '';
+    var d = new Date(ts);
+    return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' +
+      pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
+  // 顶部角标：玩法 · 期数 · 数据截止日期（鼠标悬停可看来源与最近一次联网核对）
+  function renderBadge() {
+    var c = LC.cfg(state.kind);
+    var all = LC.draws(state.kind);
+    var badge = $('#data-badge');
+    if (!badge) return;
+    var updated = c.updated || (all[all.length - 1] || {}).d || '—';
+    badge.textContent = c.name + ' · ' + all.length + ' 期 · 数据至 ' + updated;
+
+    var lines = [
+      c.name + '：共 ' + all.length + ' 期',
+      '数据截止：' + updated,
+      '历史区间：' + (c.range || '—')
+    ];
+    if (c.source) lines.push('数据来源：' + c.source);
+    var lv = window.LCLive && window.LCLive.last[state.kind];
+    if (lv && lv.ok) {
+      lines.push('最近核对：' + fmtTime(lv.at) + '（' + lv.label +
+        (lv.fromCache ? ' · 会话缓存' : '') + '）');
+    } else if (lv) {
+      lines.push('最近核对：' + fmtTime(lv.at) + ' 失败（' + (lv.error || '未知') +
+        '），仍使用本地数据');
+    } else {
+      lines.push('最近核对：进行中…');
+    }
+    badge.title = lines.join('\n');
+  }
+
   function renderHero() {
     var c = LC.cfg(state.kind);
     var all = LC.draws(state.kind);
     var last = all[all.length - 1];
     var prev = all[all.length - 2];
 
-    $('#data-badge').textContent = c.name + ' · ' + all.length + ' 期';
+    renderBadge();
 
     var sum = LC.sum(last.r);
     var odd = LC.oddCount(last.r), big = LC.bigCount(last.r, c);
@@ -123,10 +146,7 @@
     $('#latest').innerHTML =
       '<div class="latest-head">' +
       '<span class="latest-issue">第 ' + last.i + ' 期</span>' +
-      '<button class="latest-date" id="btn-history" type="button" ' +
-      'aria-label="查询历史开奖记录">' +
-      '<span>' + last.d + '</span><i class="caret">›</i>' +
-      '</button>' +
+      '<span class="latest-date">' + last.d + '</span>' +
       '</div>' +
       '<div class="latest-balls">' + ballsHtml(last.r, 'main') +
       '<span class="ball-sep">+</span>' + ballsHtml(last.b, 'special') + '</div>' +
@@ -140,7 +160,6 @@
       '<button class="latest-history-link" id="btn-history-2" type="button">' +
       '查询历史开奖记录（共 ' + all.length + ' 期）</button>';
 
-    $('#btn-history').addEventListener('click', function () { showHistoryPage(); });
     $('#btn-history-2').addEventListener('click', function () { showHistoryPage(); });
   }
 
@@ -207,24 +226,45 @@
     var seed = state.seed || (state.seed = (Date.now() & 0x7fffffff));
     var kind = state.kind;
     var params = betParams();
-    // 「避拥挤」只在单式下生效；复式 / 胆拖仍走多因子评分（确定性输出）
-    var useCrowd = state.strategy === 'crowd' && params.betType === 'single';
+    // 「避拥挤」：单式走逐注抽样，复式 / 胆拖走号码池优化
+    var useCrowd = state.strategy === 'crowd';
     var key = kind + '|' + state.window + '|' + state.halflife + '|' + state.strategy + '|' +
       [params.betType, params.dtForm, params.mainSel, params.specialSel,
         params.danCount, params.tuoCount, params.sDanCount, params.sTuoCount,
         params.tickets].join(',') +
-      '|' + state.hotPool + '|' + state.luck + '|' + crowdPlanKey() + '|' + state.crowdMax +
+      '|' + state.hotPool + '|' + state.events + '|' + state.selfPick +
+      '|' + state.luck + '|' + crowdPlanKey() + '|' + state.crowdMax +
       '|' + ((useCrowd || params.betType === 'single') ? seed : 'det');
     if (forceNewSeed) delete state.cache[key];
     if (!state.cache[key]) {
-      if (useCrowd) {
+      if (useCrowd && params.betType === 'single') {
         state.cache[key] = LCrowd.generate(kind, {
           window: state.window,
           seed: seed,
           hotPool: state.hotPool,
+          events: state.events,
+          selfPick: state.selfPick,
           luck: state.luck,
           tiers: crowdPlan(),
           crowdMax: state.crowdMax
+        });
+      } else if (useCrowd) {
+        state.cache[key] = LCrowd.buildPool(kind, {
+          window: state.window,
+          seed: seed,
+          hotPool: state.hotPool,
+          events: state.events,
+          selfPick: state.selfPick,
+          luck: state.luck,
+          crowdMax: state.crowdMax,
+          betType: params.betType,
+          mainSel: params.mainSel,
+          specialSel: params.specialSel,
+          dtForm: params.dtForm,
+          danCount: params.danCount,
+          tuoCount: params.tuoCount,
+          sDanCount: params.sDanCount,
+          sTuoCount: params.sTuoCount
         });
       } else {
         var opt = {
@@ -253,26 +293,47 @@
     return state.cache[key];
   }
 
-  /* ---------- 避拥挤：出号分层（全权重 / 权重开方 / 近乎均匀） ---------- */
+  /* ---------- 避拥挤：出号分层（按总注数自适应均分） ---------- */
 
-  var TIER_MIN = 0, TIER_MAX = 10;
+  var TIER_ORDER = ['full', 'sqrt', 'uniform'];
+  var TIER_LABEL = { full: '全权重', sqrt: '权重开方', uniform: '近乎均匀' };
 
-  function crowdPlan() {
-    return {
-      full: clampNum(state.tierFull, TIER_MIN, TIER_MAX, 2),
-      sqrt: clampNum(state.tierSqrt, TIER_MIN, TIER_MAX, 2),
-      uniform: clampNum(state.tierUniform, TIER_MIN, TIER_MAX, 1)
-    };
+  // 把总注数自适应均分到三层：
+  //   能被 3 整除 → 三等分（1:1:1）；
+  //   否则先各取 ⌊n/3⌋，余下的 1~2 注依次补给 全权重 → 开方 → 均匀，
+  //   保证三层份数最多相差 1 注，且合计恒等于总注数。
+  function splitTiers(total) {
+    var n = Math.max(1, clampNum(total, 1, 999, TICKET_DEFAULT));
+    var base = Math.floor(n / TIER_ORDER.length);
+    var plan = {};
+    TIER_ORDER.forEach(function (k) { plan[k] = base; });
+    for (var i = 0; i < n % TIER_ORDER.length; i++) plan[TIER_ORDER[i]]++;
+    return plan;
   }
+
+  // 分层注数完全由"推荐注数"派生，用户不再逐层选择
+  function crowdPlan() { return splitTiers(betParams().tickets); }
 
   function crowdPlanKey() {
     var t = crowdPlan();
-    return t.full + ',' + t.sqrt + ',' + t.uniform;
+    return TIER_ORDER.map(function (k) { return t[k]; }).join(',');
   }
 
   function crowdTotal() {
     var t = crowdPlan();
-    return t.full + t.sqrt + t.uniform;
+    return TIER_ORDER.reduce(function (s, k) { return s + t[k]; }, 0);
+  }
+
+  // 「2 注全权重 · 2 注权重开方 · 1 注近乎均匀」
+  function tierPlanText(plan) {
+    return TIER_ORDER.filter(function (k) { return plan[k] > 0; })
+      .map(function (k) { return plan[k] + ' 注' + TIER_LABEL[k]; })
+      .join(' · ');
+  }
+
+  function tierAllocHint() {
+    return '分层自动分配：' + tierPlanText(crowdPlan()) + '（共 ' + crowdTotal() + ' 注）。' +
+      '注数能被 3 整除时三层等分，否则余数依次补给 全权重 → 开方 → 均匀，三层最多相差 1 注。';
   }
 
   /* ---------- 设置区：投注方式与参数 ---------- */
@@ -372,21 +433,8 @@
           numChips('stuo', bo.specTuoMin, bo.specTuoMax, p.sTuoCount, ' 拖') + '</div>';
       }
     } else {
-      var ticketChips = TICKET_PRESETS.map(function (n) {
-        return '<button class="chip' + (p.tickets === n ? ' active' : '') +
-          '" data-tickets="' + n + '">' + n + ' 注</button>';
-      }).join('');
-      fields += '<div class="field"><label>推荐注数（' + TICKET_MIN + '–' + TICKET_MAX +
-        ' 注，可在输入框里自定义）</label>' +
-        '<div class="chips">' + ticketChips +
-        '<label class="chip-input' + (isPresetTickets(p.tickets) ? '' : ' active') +
-        '" for="tickets-input">' +
-        '<input id="tickets-input" type="number" inputmode="numeric" ' +
-        'min="' + TICKET_MIN + '" max="' + TICKET_MAX + '" step="1" ' +
-        'value="' + p.tickets + '" aria-label="自定义推荐注数">' +
-        '<span class="chip-input-unit">注</span>' +
-        '</label>' +
-        '</div></div>';
+      fields += ticketFields(p, '推荐注数（' + TICKET_MIN + '–' + TICKET_MAX +
+        ' 注，可在输入框里自定义）');
     }
     var pv = betPreview(c, bo, p);
     fields += previewHtml(pv);
@@ -395,22 +443,29 @@
 
   /* ---------- 避拥挤策略：设置区字段 ---------- */
 
+  // 单式的「推荐注数」：快捷芯片 + 自定义输入框（避拥挤下同时决定三层分层注数）
+  function ticketFields(p, label) {
+    var ticketChips = TICKET_PRESETS.map(function (n) {
+      return '<button class="chip' + (p.tickets === n ? ' active' : '') +
+        '" data-tickets="' + n + '">' + n + ' 注</button>';
+    }).join('');
+    return '<div class="field"><label>' + label + '</label>' +
+      '<div class="chips">' + ticketChips +
+      '<label class="chip-input' + (isPresetTickets(p.tickets) ? '' : ' active') +
+      '" for="tickets-input">' +
+      '<input id="tickets-input" type="number" inputmode="numeric" ' +
+      'min="' + TICKET_MIN + '" max="' + TICKET_MAX + '" step="1" ' +
+      'value="' + p.tickets + '" aria-label="自定义推荐注数">' +
+      '<span class="chip-input-unit">注</span>' +
+      '</label></div></div>';
+  }
+
   function crowdTierFields(c, bo) {
-    var plan = crowdPlan();
-    function row(key, label, desc, val) {
-      var chips = '<button class="chip' + (val === 0 ? ' active' : '') +
-        '" data-tier="' + key + '" data-tn="0">不生成</button>';
-      for (var n = 1; n <= 4; n++) {
-        chips += '<button class="chip' + (val === n ? ' active' : '') +
-          '" data-tier="' + key + '" data-tn="' + n + '">' + n + ' 注</button>';
-      }
-      return '<div class="field"><label>' + label + '（' + desc + '）</label>' +
-        '<div class="chips">' + chips + '</div></div>';
-    }
-    return row('full', '全权重注数', '完全按避拥挤权重抽样', plan.full) +
-      row('sqrt', '权重开方注数', '对权重开平方，压低强弱差距', plan.sqrt) +
-      row('uniform', '近乎均匀注数', '接近均匀抽样，兜底防扎堆', plan.uniform) +
-      previewHtml(betPreview(c, bo, betParams()));
+    var p = betParams();
+    return ticketFields(p, '推荐注数（' + TICKET_MIN + '–' + TICKET_MAX +
+      ' 注，三层自适应均分）') +
+      '<p class="hint" id="tier-alloc">' + tierAllocHint() + '</p>' +
+      previewHtml(betPreview(c, bo, p));
   }
 
   function crowdThresholdField() {
@@ -423,11 +478,31 @@
       '<div class="chips">' + chips + '</div></div>';
   }
 
+  // 复式 / 胆拖下的说明：为什么换成"号码池"目标
+  function crowdPoolHint() {
+    return '<p class="hint">复式 / 胆拖买的是"一批号码"：一张票展开成多注，每注拥挤度各不相同，' +
+      '票面没有单一拥挤度，也没法把其中某几注剔除。所以这里改为优化<b>号码池</b>——' +
+      '池子大小由上面的选号个数决定，系统把池子展开后的全部组合一起评价，' +
+      '让平均拥挤度最低、踩中 P0/P1 与形态要求的比例最小。</p>' +
+      '<p class="hint">注意：展开后仍会有少量形态越界组合（无法逐注剔除），' +
+      '结果页会标注实际比例，并把它们计入"池子代价"压到最低。</p>';
+  }
+
   function crowdSourceFields() {
-    return '<div class="field"><label>热门号池（AI 荐号 / 主播 / 群聊合买 / 热搜数字，空格或逗号分隔）</label>' +
+    return '<div class="field"><label>热门号池（AI 荐号 / 主播 / 群聊合买，空格或逗号分隔）</label>' +
       '<textarea id="hotpool-input" class="ta" rows="2" ' +
       'placeholder="例如：8 18 28 33">' + esc(state.hotPool) + '</textarea>' +
       '<p class="hint">P3 拥挤黑名单：命中 ≥5 个直接作废，命中越少拥挤度越低。</p></div>' +
+      '<div class="field"><label>实时事件数字（热搜数字 / 赛事比分 / 胜者编号，空格或逗号分隔）</label>' +
+      '<textarea id="events-input" class="ta" rows="2" ' +
+      'placeholder="例如：3 比 1&#10;胜者 7 号球衣 39&#10;热搜 618">' + esc(state.events) + '</textarea>' +
+      '<p class="hint">E2 实时事件：数字同样按七条映射落到号码池，与日历项（E1）一起构成环境项，' +
+      '对单号拥挤度的调整封顶 ±10%（E4）。</p></div>' +
+      '<div class="field"><label>历史自买号码（自己以前买过的号，空格或逗号分隔）</label>' +
+      '<textarea id="selfpick-input" class="ta" rows="2" ' +
+      'placeholder="例如：3 11 19 22 28 31 + 9">' + esc(state.selfPick) + '</textarea>' +
+      '<p class="hint">P4 自我重复：与历史自买号码重合 ≥5 个直接作废，' +
+      '本次各注之间也会限制重号数，避免"自己再撞自己"。</p></div>' +
       '<div class="field"><label>运气源（每行一条，可在行首写日期 YYYY-MM-DD）</label>' +
       '<textarea id="luck-input" class="ta" rows="3" ' +
       'placeholder="2026-09-12 大奖得主球衣 39 号&#10;暴涨代码 0.618&#10;锦鲤序号 88">' +
@@ -447,13 +522,16 @@
     if (box) box.classList.toggle('active', !isPresetTickets(n));
   }
 
-  // 即时刷新"预计 X 注 · Y 元"（不重建 DOM，避免输入时丢焦点）
+  // 即时刷新"预计 X 注 · Y 元"与分层分配文案（不重建 DOM，避免输入时丢焦点）
   function updateBetPreview(panel) {
     var box = $('#bet-preview', panel);
-    if (!box) return;
-    var pv = betPreview(LC.cfg(state.kind), betOpts(), betParams());
-    box.innerHTML = '<span>预计</span><b>' + pv.combos.toLocaleString() +
-      ' 注</b><span>·</span><b>' + pv.cost.toLocaleString() + ' 元</b>';
+    if (box) {
+      var pv = betPreview(LC.cfg(state.kind), betOpts(), betParams());
+      box.innerHTML = '<span>预计</span><b>' + pv.combos.toLocaleString() +
+        ' 注</b><span>·</span><b>' + pv.cost.toLocaleString() + ' 元</b>';
+    }
+    var alloc = $('#tier-alloc', panel);
+    if (alloc) alloc.textContent = tierAllocHint();
   }
 
   // 输入非法（空值 / 越界 / 非数字）时给外框标红，失焦时再拉回合法区间
@@ -644,14 +722,19 @@
 
   // 二级页标题：胆拖要区分主区 / 特别区 / 双区
   function recBetLabel(p) {
-    if (state.strategy === 'crowd' && p.betType === 'single') return '避拥挤';
+    if (state.strategy === 'crowd') {
+      if (p.betType === 'single') return '避拥挤';
+      return '避拥挤 · ' + (p.betType === 'dantuo'
+        ? LM.dtFormLabel(state.kind, p.dtForm) : betLabel(p.betType));
+    }
     if (p.betType === 'dantuo') return LM.dtFormLabel(state.kind, p.dtForm);
     return betLabel(p.betType);
   }
 
   /* ---------- 二级页：推荐号码 ---------- */
   function resultPageHtml(c, p, pv) {
-    var canRegen = state.betType === 'single';
+    // 换一批：单式与避拥挤（单式 / 号码池）都由种子驱动，可复现
+    var canRegen = state.betType === 'single' || state.strategy === 'crowd';
     return '<header class="page-nav">' +
       '<button class="back-btn" id="btn-back" aria-label="返回设置">‹</button>' +
       '<div class="page-nav-text">' +
@@ -862,39 +945,32 @@
         '" data-bet="' + b.v + '">' + b.label + '</button>';
     }).join('');
 
-    var stratChips = STRATEGY_META.map(function (s) {
-      return '<button class="chip' + (state.strategy === s.v ? ' active' : '') +
-        '" data-strategy="' + s.v + '">' + s.label + '</button>';
-    }).join('');
-
-    var stratMeta = STRATEGY_META.filter(function (s) { return s.v === state.strategy; })[0] || STRATEGY_META[0];
-    var isCrowd = state.strategy === 'crowd';
-
     var pv = betPreview(c, bo, p);
 
     var setupBody =
-      '<div class="field"><label>推荐策略</label><div class="chips">' + stratChips + '</div>' +
-      '<p class="hint">' + esc(stratMeta.desc) + '</p></div>' +
       '<div class="field"><label>分析样本窗口</label><div class="chips">' + winChips + '</div></div>';
 
-    if (isCrowd) {
+    // 投注方式可切换：单式走逐注抽样，复式 / 胆拖走号码池优化
+    setupBody +=
+      '<div class="field"><label>投注方式</label><div class="chips">' + betChips + '</div>' +
+      betNote(c, bo, p) + '</div>';
+
+    if (p.betType === 'single') {
       setupBody +=
-        '<div class="sub-title">出号分层</div>' + crowdTierFields(c, bo) +
-        crowdThresholdField() +
-        '<div class="sub-title">环境（E）与欧气（L）</div>' + crowdSourceFields();
+        '<div class="sub-title">注数与出号分层</div>' + crowdTierFields(c, bo) +
+        crowdThresholdField();
     } else {
-      setupBody +=
-        '<div class="field"><label>投注方式</label><div class="chips">' + betChips + '</div>' +
-        betNote(c, bo, p) + '</div>' + betParamFields(c, bo, p);
+      setupBody += betParamFields(c, bo, p) + crowdThresholdField() + crowdPoolHint();
     }
 
-    var hint = isCrowd
-      ? '避拥挤出号不做任何预测：开奖是独立随机事件，单注中奖概率恒等。它只逐层筛掉大众扎堆的号码与形态，' +
-        '降低中奖后被分摊的人数。全部 ' + LC.draws(state.kind).length +
-        ' 期历史用于 P0 历史同源与形态统计口径。'
-      : '模型使用全部 ' + LC.draws(state.kind).length +
-        ' 期历史数据训练，窗口仅影响结构典型度的统计口径。' +
-        (state.betType === 'single' ? '' : '复式与胆拖按号码综合评分取前 N 名，属于确定性输出。');
+    setupBody += '<div class="sub-title">环境（E）与欧气（L）</div>' + crowdSourceFields();
+
+    var hint = '避拥挤出号不做任何预测：开奖是独立随机事件，每注中奖概率恒等。' +
+      (state.betType === 'single'
+        ? '它只逐层筛掉大众扎堆的号码与形态，降低中奖后被分摊的人数。'
+        : '复式 / 胆拖无法逐注剔除，改为优化号码池，让展开后的平均拥挤度最低。') +
+      '全部 ' + LC.draws(state.kind).length +
+      ' 期历史用于 P0 历史同源与形态统计口径。';
 
     var html =
       '<div class="card">' +
@@ -941,25 +1017,6 @@
         renderRecommend();
       });
     });
-    $$('.chips [data-strategy]', panel).forEach(function (b) {
-      b.addEventListener('click', function () {
-        state.strategy = b.dataset.strategy;
-        // 避拥挤只对单式生效，切过去时把投注方式拉回单式
-        if (state.strategy === 'crowd') state.betType = 'single';
-        state.seed = (Date.now() & 0x7fffffff);
-        renderRecommend();
-      });
-    });
-    $$('.chips [data-tier]', panel).forEach(function (b) {
-      b.addEventListener('click', function () {
-        var key = b.dataset.tier, n = Number(b.dataset.tn);
-        if (key === 'full') state.tierFull = n;
-        else if (key === 'sqrt') state.tierSqrt = n;
-        else state.tierUniform = n;
-        state.seed = (Date.now() & 0x7fffffff);
-        renderRecommend();
-      });
-    });
     $$('.chips [data-crowdmax]', panel).forEach(function (b) {
       b.addEventListener('click', function () {
         state.crowdMax = Number(b.dataset.crowdmax);
@@ -979,6 +1036,20 @@
     if (luckInput) {
       luckInput.addEventListener('input', function () {
         state.luck = luckInput.value;
+        state.seed = (Date.now() & 0x7fffffff);
+      });
+    }
+    var evtInput = $('#events-input', panel);
+    if (evtInput) {
+      evtInput.addEventListener('input', function () {
+        state.events = evtInput.value;
+        state.seed = (Date.now() & 0x7fffffff);
+      });
+    }
+    var selfInput = $('#selfpick-input', panel);
+    if (selfInput) {
+      selfInput.addEventListener('input', function () {
+        state.selfPick = selfInput.value;
         state.seed = (Date.now() & 0x7fffffff);
       });
     }
@@ -1211,7 +1282,11 @@
       ['P1', '极端形态', t.checks.P1, '无 3 连号 / 全等差 / 对称 / 同尾≥3 / 全奇全偶 / 全大全小 / 挤同区'],
       ['P2', '大众偏好', true, '以拥挤度量化，不作硬排除'],
       ['P3', '拥挤黑名单', t.checks.P3, '热门号池命中 ' + t.checks.poolHits + ' 个（要求 < 5）'],
-      ['P4', '自我重复', true, '本次各注之间重号 ≤ ' + (rec.maxOverlap - 1) + ' 个'],
+      ['P4', '自我重复', t.checks.P4,
+        '本次各注之间重号 ≤ ' + (rec.maxOverlap - 1) + ' 个' +
+        (rec.selfPick && rec.selfPick.count
+          ? '；与历史自买重合 ' + t.checks.selfHits + ' 个（要求 < 5）'
+          : '；未填写历史自买号码')],
       ['形态', '形态要求', t.checks.structure, '和值 / 跨度 / 奇偶 / 大小 / 区间 / 连号 全部达标']
     ].map(function (x) {
       return '<span class="check-chip ' + (x[2] ? 'ok' : 'bad') + '" title="' + esc(x[3]) + '">' +
@@ -1263,20 +1338,19 @@
       '</div>';
   }
 
-  function renderCrowdResult(box, rec) {
+  // 五维图例：单式与号码池共用
+  function crowdLegendHtml() {
+    return '<div class="factor-legend">' + Object.keys(CROWD_PART_META).map(function (k) {
+      return '<div class="legend-row"><i style="background:' + CROWD_PART_META[k].color +
+        '"></i><b>' + CROWD_PART_META[k].name + '</b><span>' +
+        CROWD_PART_META[k].desc + '</span></div>';
+    }).join('') + '</div>';
+  }
+
+  // 号码拥挤度排行卡：单式与号码池共用
+  function crowdPoolGridCard(rec) {
     var c = rec.config;
-    var t = rec.plan;
-    var tierText = [];
-    if (t.full) tierText.push(t.full + ' 注全权重');
-    if (t.sqrt) tierText.push(t.sqrt + ' 注权重开方');
-    if (t.uniform) tierText.push(t.uniform + ' 注近乎均匀');
-
-    var ticketsHtml = rec.tickets.map(function (tk, i) {
-      return crowdTicketHtml(tk, i, c, rec);
-    }).join('') ||
-      '<p class="muted small">在当前筛选条件下未能生成号码，请放宽拥挤度上限或清空热门号池后重试。</p>';
-
-    function poolRow(o, cls) {
+    function row(o, cls) {
       var v = o.crowd * 100;
       return '<div class="pool-row">' +
         '<i class="ball ' + cls + ' sm">' + pad2(o.num) + '</i>' +
@@ -1285,15 +1359,49 @@
         '%;background:' + crowdColor(v) + '"></i></span>' +
         '</div>';
     }
+    return '<div class="card">' +
+      '<div class="card-head"><h3>号码拥挤度排行</h3><span class="badge">越靠前越冷门</span></div>' +
+      '<p class="muted small">拥挤度 0–100：来自生日号偏好、谐音吉利尾、小号偏好、长期热度、上期开出，' +
+      '以及日历 / 事件环境项（调整幅度封顶 ±10%）。</p>' +
+      '<div class="subtabs">' +
+      '<button class="subtab active" data-sub="main">' + c.mainLabel + '拥挤度</button>' +
+      '<button class="subtab" data-sub="special">' + c.specialLabel + '拥挤度</button>' +
+      '</div>' +
+      '<div class="pool-grid" id="pool-main">' +
+      rec.poolCrowd.map(function (o) { return row(o, 'ball-main'); }).join('') +
+      '</div>' +
+      '<div class="pool-grid hidden" id="pool-special">' +
+      rec.specialCrowd.map(function (o) { return row(o, 'ball-special'); }).join('') +
+      '</div>' +
+      '</div>';
+  }
 
-    var poolRows = rec.poolCrowd.map(function (o) { return poolRow(o, 'ball-main'); }).join('');
-    var specRows = rec.specialCrowd.map(function (o) { return poolRow(o, 'ball-special'); }).join('');
-
+  // 环境（E）与欧气（L）卡：单式与号码池共用
+  function crowdEnvCard(rec) {
     var hotHtml = rec.hotPool.count
       ? '<span class="balls">' + rec.hotPool.list.map(function (n) {
         return '<i class="ball ball-hot sm">' + pad2(n) + '</i>';
       }).join('') + '</span>'
       : '<span class="muted small">未填写（可粘贴 AI / 主播荐号、群聊合买号或热搜数字）</span>';
+
+    var evtNums = Object.keys(rec.events || {}).map(function (k) {
+      return { num: Number(k), boost: rec.events[k] };
+    }).sort(function (a, b) { return b.boost - a.boost; }).slice(0, 12);
+    var evtHtml = evtNums.length
+      ? '<div class="luck-list">' + evtNums.map(function (x) {
+        return '<span class="luck-item"><i class="ball ball-event sm">' + pad2(x.num) +
+          '</i><b>+' + x.boost.toFixed(2) + '</b></span>';
+      }).join('') + '</div>'
+      : '<span class="muted small">未填写实时事件数字（热搜 / 赛事比分 / 胜者编号）</span>';
+
+    var selfList = (rec.selfPick && rec.selfPick.count)
+      ? rec.selfPick.list.slice().sort(function (a, b) { return a - b; }) : [];
+    var selfHtml = selfList.length
+      ? '<span class="balls">' + selfList.map(function (n) {
+        return '<i class="ball ball-self sm">' + pad2(n) + '</i>';
+      }).join('') + '</span>' +
+        '<span class="muted small"> 共 ' + selfList.length + ' 个号，新号与其重合 ≥5 个作废</span>'
+      : '<span class="muted small">未填写历史自买号码（填了才会启用 P4 自我重复作废）</span>';
 
     var luckNums = Object.keys(rec.luck.main.map).map(function (k) {
       return { num: Number(k), boost: rec.luck.main.map[k] };
@@ -1325,39 +1433,10 @@
         ((LCrowd.CROWD_WEIGHTS[k] || 0) * 100).toFixed(0) + '%</b></span>';
     }).join('');
 
-    box.innerHTML =
-      '<div class="card">' +
-      '<div class="card-head"><h3>避拥挤推荐方案</h3>' +
-      '<span class="badge">拥挤度上限 ' + rec.threshold + '</span></div>' +
-      '<p class="muted small">先按 P0–P4 逐层作废、再由【形态要求】筛掉越界组合，' +
-      '最后按避拥挤权重加权随机抽样出号：' + tierText.join(' · ') +
-      '。共抽样 ' + rec.attempts + ' 次，随机种子 ' + rec.seed +
-      '。拥挤度越低，说明这一注越"不像大多数人会买的号"。</p>' +
-      '<p class="hint">淘汰统计：P0/P1/P4 作废 ' + rec.rejected.hard + ' 次 · ' +
-      '形态要求越界 ' + rec.rejected.structure + ' 次 · 拥挤度超限 ' +
-      rec.rejected.crowd + ' 次 · 注间撞号重抽 ' + rec.rejected.overlap + ' 次。</p>' +
-      ticketsHtml +
-      '<div class="factor-legend">' + Object.keys(CROWD_PART_META).map(function (k) {
-        return '<div class="legend-row"><i style="background:' + CROWD_PART_META[k].color +
-          '"></i><b>' + CROWD_PART_META[k].name + '</b><span>' +
-          CROWD_PART_META[k].desc + '</span></div>';
-      }).join('') + '</div>' +
-      '</div>' +
-
-      '<div class="card">' +
-      '<div class="card-head"><h3>号码拥挤度排行</h3><span class="badge">越靠前越冷门</span></div>' +
-      '<p class="muted small">拥挤度 0–100：来自生日号偏好、谐音吉利尾、小号偏好、长期热度、上期开出，' +
-      '以及日历 / 事件环境项（调整幅度封顶 ±10%）。模型优先从低拥挤号码中抽样。</p>' +
-      '<div class="subtabs">' +
-      '<button class="subtab active" data-sub="main">' + c.mainLabel + '拥挤度</button>' +
-      '<button class="subtab" data-sub="special">' + c.specialLabel + '拥挤度</button>' +
-      '</div>' +
-      '<div class="pool-grid" id="pool-main">' + poolRows + '</div>' +
-      '<div class="pool-grid hidden" id="pool-special">' + specRows + '</div>' +
-      '</div>' +
-
-      '<div class="card">' +
+    return '<div class="card">' +
       '<div class="card-head"><h3>本期环境（E）与欧气（L）</h3></div>' +
+      '<div class="sub-title">实时事件命中的号码（E2）</div>' + evtHtml +
+      '<div class="sub-title">历史自买 · 自我重复（P4）</div>' + selfHtml +
       '<div class="sub-title">热门号池 · 拥挤黑名单（P3）</div>' + hotHtml +
       '<div class="sub-title">运气源命中的号码（加权值，封顶 +3.0）</div>' +
       '<div class="luck-list">' + luckHtml + '</div>' +
@@ -1367,6 +1446,162 @@
       '<p class="hint">环境因子（E）判断"别人会买什么"，欧气因子（L）给号码加权，' +
       '两者都只改变抽样概率，不改变中奖概率。奖池与派奖信息请以官方公告为准。</p>' +
       '</div>';
+  }
+
+  // 复式 / 胆拖：号码池方案（评价单元是"一张票"，展示池 + 展开统计）
+  function poolFormula(c, rec) {
+    var n = rec.counts;
+    var mainPart = rec.dtForm === 'special'
+      ? '1'
+      : (rec.betType === 'dantuo'
+        ? 'C(' + c.mainLabel + '拖码 ' + n.tuoCount + ', ' + (c.mainCount - n.danCount) + ')'
+        : 'C(' + c.mainLabel + '选号 ' + n.mainSel + ', ' + c.mainCount + ')');
+    var specPart = (rec.betType === 'dantuo' && rec.dtForm !== 'main')
+      ? 'C(' + c.specialLabel + '拖码 ' + n.sTuoCount + ', ' + (c.specialCount - n.sDanCount) + ')'
+      : 'C(' + c.specialLabel + '选号 ' + n.specialSel + ', ' + c.specialCount + ')';
+    return mainPart + ' × ' + specPart;
+  }
+
+  function renderCrowdPoolResult(box, rec) {
+    var c = rec.config;
+    var e = rec.expanded;
+    var b = rec.bet;
+    var n = rec.counts;
+    var isDan = rec.betType === 'dantuo';
+    var form = rec.dtForm;
+    var roleName = {
+      dan: '胆码', tuo: '拖码', main: c.mainLabel,
+      sDan: c.specialLabel + '胆码', sTuo: c.specialLabel + '拖码', special: c.specialLabel
+    };
+    var roleCls = {
+      dan: 'ball-main', tuo: 'ball-drag', main: 'ball-main',
+      sDan: 'ball-special', sTuo: 'ball-special-drag', special: 'ball-special'
+    };
+
+    function group(label, nums, role) {
+      return '<div class="bet-group"><span class="bet-group-label">' + label + '</span>' +
+        '<span class="balls">' + nums.map(function (x) {
+          return '<i class="ball ' + roleCls[role] + '">' + pad2(x) + '</i>';
+        }).join('') + '</span></div>';
+    }
+
+    var tag;
+    if (isDan && form === 'special') {
+      tag = c.mainLabel + ' ' + c.mainCount + ' 个 + ' + n.sDanCount + ' 个' +
+        c.specialLabel + '胆 + ' + n.sTuoCount + ' 拖';
+    } else if (isDan && form === 'both') {
+      tag = n.danCount + ' 胆 + ' + n.tuoCount + ' 拖 + ' + n.sDanCount + ' 个' +
+        c.specialLabel + '胆 + ' + n.sTuoCount + ' 拖';
+    } else if (isDan) {
+      tag = n.danCount + ' 胆 + ' + n.tuoCount + ' 拖 + ' + n.specialSel + ' 个' + c.specialLabel;
+    } else {
+      tag = n.mainSel + ' 个' + c.mainLabel + ' + ' + n.specialSel + ' 个' + c.specialLabel;
+    }
+
+    var mainHtml = form === 'special'
+      ? group(c.mainLabel + '号码池', rec.pool.main, 'main')
+      : (isDan
+        ? group('胆码（每注必含）', rec.dan, 'dan') + group('拖码', rec.tuo, 'tuo')
+        : group(c.mainLabel + '号码池', rec.pool.main, 'main'));
+    var specHtml = (isDan && form !== 'main')
+      ? group(c.specialLabel + '胆码', rec.sDan, 'sDan') +
+        group(c.specialLabel + '拖码', rec.sTuo, 'sTuo')
+      : group(c.specialLabel + '号码池', rec.pool.special, 'special');
+
+    // 池内号码按拥挤度从冷到热排列，方便直接看出"池子为什么长这样"
+    function detailHtml(list) {
+      return list.slice().sort(function (x, y) { return x.crowd - y.crowd; }).map(function (d) {
+        return '<div class="num-detail">' +
+          '<div class="num-detail-head"><i class="ball ' + roleCls[d.role] + '">' + pad2(d.num) + '</i>' +
+          '<span>' + roleName[d.role] + ' · 拥挤度 ' + (d.crowd * 100).toFixed(0) +
+          ' · 冷门排名第 ' + d.rank + '</span></div>' + numPartBars(d.parts) + '</div>';
+      }).join('');
+    }
+
+    var partBars = Object.keys(CROWD_PART_META).map(function (k) {
+      var v = e.parts[k] || 0;
+      return '<div class="fbar-row"><span class="fbar-name">' + CROWD_PART_META[k].name +
+        '</span><span class="fbar-track"><i style="background:' + CROWD_PART_META[k].color +
+        ';width:' + Math.min(v * 100, 100).toFixed(0) + '%;margin-left:0"></i></span>' +
+        '<span class="fbar-val">' + (v * 100).toFixed(0) + '</span></div>';
+    }).join('');
+
+    var invalidRate = e.count ? ((e.hardInvalid + e.structInvalid) / e.count) * 100 : 0;
+
+    box.innerHTML =
+      '<div class="card">' +
+      '<div class="card-head"><h3>避拥挤号码池方案</h3>' +
+      '<span class="badge">拥挤度上限 ' + rec.threshold + '</span></div>' +
+      '<p class="muted small">复式 / 胆拖买的是"一批号码"：这张票展开成 ' + e.count +
+      ' 注（主区），每注拥挤度各不相同，票面没有单一拥挤度、也没法把其中某几注剔除。' +
+      '所以改优化<b>号码池</b>——把池子展开后的全部组合一起评价，' +
+      '让平均拥挤度最低、踩中 P0/P1 与形态要求的比例最小。</p>' +
+      '<p class="hint">展开统计：平均拥挤度 ' + e.mean.toFixed(1) +
+      (e.count > 1
+        ? ' · 最低 ' + e.min.toFixed(1) + ' · 最高 ' + e.max.toFixed(1) +
+          ' · 90 分位 ' + e.p90.toFixed(1)
+        : ' · 主区固定选满，无展开') +
+      ' · 超上限 ' + e.over + ' 注 · P0/P1/P4 作废 ' + e.hardInvalid +
+      (e.selfInvalid ? ' 注（其中历史自买重合 ≥5 的 ' + e.selfInvalid + ' 注）' : ' 注') +
+      ' · 形态越界 ' + e.structInvalid + ' 注（合计 ' + invalidRate.toFixed(1) + '%）· ' +
+      '共评价 ' + rec.attempts.toLocaleString() + ' 次展开 · 随机种子 ' + rec.seed + '</p>' +
+      crowdMeter('展开平均拥挤度', e.mean) +
+      crowdMeter('形态越界比例', invalidRate) +
+      '<div class="ticket bet-ticket">' +
+      '<div class="ticket-head">' +
+      '<span class="ticket-no">' +
+      (isDan ? LM.dtFormLabel(rec.kind, form) : betLabel(rec.betType)) +
+      '投注 · ' + tag + '</span>' +
+      '<span class="ticket-score">' + b.combos.toLocaleString() + ' 注 · ' +
+      (b.combos * b.yuanPerBet).toLocaleString() + ' 元</span>' +
+      '</div>' +
+      '<div class="bet-groups">' + mainHtml + specHtml + '</div>' +
+      '<div class="bet-formula">展开：' + poolFormula(c, rec) + ' = ' +
+      b.combos.toLocaleString() + ' 注 · 主区展开平均拥挤度 ' + e.mean.toFixed(1) + '</div>' +
+      '<button class="link-btn" data-toggle="pool" data-open="查看池内每个号码的拥挤度 ▾" ' +
+      'data-close="收起号码拥挤度 ▴">查看池内每个号码的拥挤度 ▾</button>' +
+      '<div class="ticket-detail" id="td-pool">' +
+      '<div class="sub-title">主区号码（按拥挤度从冷到热）</div>' + detailHtml(rec.mainDetail) +
+      '<div class="sub-title">' + c.specialLabel + '号码</div>' + detailHtml(rec.specialDetail) +
+      '<div class="sub-title">池内组合平均拥挤度构成</div>' + partBars +
+      '</div>' +
+      '</div>' +
+      crowdLegendHtml() +
+      '</div>' +
+      crowdPoolGridCard(rec) +
+      crowdEnvCard(rec);
+
+    bindToggles(box);
+  }
+
+  function renderCrowdResult(box, rec) {
+    var c = rec.config;
+    var t = rec.plan;
+    var tierText = tierPlanText(t);
+
+    var ticketsHtml = rec.tickets.map(function (tk, i) {
+      return crowdTicketHtml(tk, i, c, rec);
+    }).join('') ||
+      '<p class="muted small">在当前筛选条件下未能生成号码，请放宽拥挤度上限或清空热门号池后重试。</p>';
+
+    box.innerHTML =
+      '<div class="card">' +
+      '<div class="card-head"><h3>避拥挤推荐方案</h3>' +
+      '<span class="badge">拥挤度上限 ' + rec.threshold + '</span></div>' +
+      '<p class="muted small">先按 P0–P4 逐层作废、再由【形态要求】筛掉越界组合，' +
+      '最后按避拥挤权重加权随机抽样出号：' + tierText +
+      '。共抽样 ' + rec.attempts + ' 次，随机种子 ' + rec.seed +
+      '。拥挤度越低，说明这一注越"不像大多数人会买的号"。</p>' +
+      '<p class="hint">淘汰统计：P0/P1/P4 作废 ' + rec.rejected.hard + ' 次 · ' +
+      '形态要求越界 ' + rec.rejected.structure + ' 次 · 拥挤度超限 ' +
+      rec.rejected.crowd + ' 次 · 注间撞号重抽 ' + rec.rejected.overlap + ' 次。</p>' +
+      ticketsHtml +
+      crowdLegendHtml() +
+      '</div>' +
+
+      crowdPoolGridCard(rec) +
+
+      crowdEnvCard(rec);
 
     bindToggles(box);
   }
@@ -1378,7 +1613,11 @@
     var c = rec.config;
     var ticketsHtml;
 
-    if (rec.strategy === 'crowd') { renderCrowdResult(box, rec); return; }
+    if (rec.strategy === 'crowd') {
+      if (rec.mode === 'pool') renderCrowdPoolResult(box, rec);
+      else renderCrowdResult(box, rec);
+      return;
+    }
 
     if (rec.bet && rec.bet.type !== 'single') {
       ticketsHtml = betCardHtml(rec);
@@ -1878,6 +2117,107 @@
   }
 
   /* ============================================================
+   * 首页加载完成：自动核对最新开奖
+   *   · 首次加载要把双色球 + 大乐透都拿到（live.js 内部失败会自动重试）；
+   *   · 只补"最近 30 期"的缺口 / 修正与官方不一致的期（LC.patchDraws）；
+   *   · 有新数据才重算并重渲染，失败就继续用本地数据，功能不受影响；
+   *   · 全部成功时提示条自动收起，有玩法没拿到则常驻并提供"重试"，
+   *     角标长期显示"数据至 某日"与每个玩法的最近核对时间。
+   * ========================================================== */
+  var noteTimer = null;
+
+  function liveNote(html, cls, hideAfter) {
+    var box = $('#live-note');
+    if (!box) return;
+    clearTimeout(noteTimer);
+    box.classList.remove('fading');
+    if (!html) { box.hidden = true; box.innerHTML = ''; return; }
+    box.hidden = false;
+    box.className = 'live-note' + (cls ? ' ' + cls : '');
+    box.innerHTML = '<i class="dot"></i>' + html;
+    if (hideAfter) {
+      noteTimer = setTimeout(function () {
+        box.classList.add('fading');
+        noteTimer = setTimeout(function () {
+          box.hidden = true;
+          box.innerHTML = '';
+        }, 320);
+      }, hideAfter);
+    }
+  }
+
+  var LIVE_KINDS = ['ssq', 'dlt'];
+  var liveBusy = false;                    // 一轮核对进行中，避免重复触发
+
+  // 单个玩法的核对结果文案（始终用 res.kind，不跟随当前切换到的玩法）
+  function liveResText(res) {
+    var name = LC.cfg(res.kind).name;
+    if (!res.ok) return '<b>' + name + '</b> 未取到';
+    var d = res.latest && res.latest.date ? res.latest.date : '—';
+    var tail = res.added ? '新增 ' + res.added + ' 期'
+      : (res.fixed ? '修正 ' + res.fixed + ' 期' : '已是最新');
+    return '<b>' + name + '</b> ' + tail + '（数据至 ' + d + '）';
+  }
+
+  // kinds 省略 = 双色球 + 大乐透一起核对。首次加载要保证两个玩法都拿到：
+  //   · 谁先拿到就先把它用起来，不必等另一个（某个来源卡住也不会拖住整页）；
+  //   · 都拿到 → 提示条数秒后自动收起；
+  //   · 有玩法没拿到 → 提示常驻，并提供"只重试失败玩法"的入口。
+  function syncLive(kinds) {
+    if (!window.LCLive || liveBusy) return;
+    var list = kinds && kinds.length ? kinds : LIVE_KINDS.slice();
+    var results = [];
+    liveBusy = true;
+
+    function progressText() {
+      return list.map(function (k) {
+        var done = null;
+        results.forEach(function (r) { if (r.kind === k) done = r; });
+        return done ? liveResText(done) : '<b>' + LC.cfg(k).name + '</b> 核对中…';
+      }).join(' · ');
+    }
+
+    function onOne(res) {
+      results.push(res);
+      renderBadge();
+      if (res.ok && (res.added || res.fixed)) {
+        state.cache = {};                  // 统计 / 推荐 / 回测都依赖全量数据，必须失效
+        renderHero();
+        if (!stack.length) switchTab(state.tab);
+      }
+
+      if (results.length < list.length) {
+        liveNote('正在核对最新开奖：' + progressText(), 'syncing');
+        return;
+      }
+
+      liveBusy = false;                    // 这一轮结束，允许再次核对 / 重试
+      var fails = results.filter(function (r) { return !r.ok; });
+      var text = progressText();
+      if (!fails.length) {
+        liveNote('开奖核对完成：' + text, 'ok', 12000);
+        return;
+      }
+
+      // 有玩法没拿到：提示常驻（不自动收起），点"重试"只重试失败的玩法
+      var fileMode = window.LCLive.fileMode ||
+        (typeof location !== 'undefined' && location.protocol === 'file:');
+      var hint = fileMode
+        ? '　当前以 file:// 直接打开：浏览器不发 Referer（双色球接口需要）、又会拦截跨域（大乐透接口需要），两个来源都取不到。请在项目目录执行 <code>python3 -m http.server 8000</code>，再访问 http://localhost:8000'
+        : '';
+      liveNote('开奖核对：' + text +
+        ' <button type="button" id="live-retry" class="live-retry">重试</button>' + hint, 'fail');
+      var btn = $('#live-retry');
+      if (btn) btn.addEventListener('click', function () {
+        syncLive(fails.map(function (r) { return r.kind; }));
+      });
+    }
+
+    liveNote('正在核对最新开奖：' + progressText(), 'syncing');
+    list.forEach(function (kind) { window.LCLive.sync(kind, onOne); });
+  }
+
+  /* ============================================================
    * Tab 切换与初始化
    * ========================================================== */
   function switchTab(tab) {
@@ -1925,6 +2265,8 @@
     });
     renderHero();
     switchTab('recommend');
+    // 首页渲染完成后再去核对最新开奖：失败也只是"没更新"，不影响任何功能
+    syncLive();
   }
 
   if (document.readyState === 'loading') {

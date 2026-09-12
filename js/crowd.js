@@ -29,7 +29,9 @@
  *     L1 运气源 / L2 提数字 / L3 七条映射 / L4 权重合成
  *       半衰期 7 天 · 单号封顶 +3.0 · 不取最高（叠加）· 加权抽样
  *   出号
- *     加权随机抽样 → 2 注全权重 · 2 注权重开方 · 1 注近乎均匀
+ *     单式：加权随机抽样 → 三层自适应均分：能整除则 1:1:1，余数补给 全权重 → 开方 → 均匀
+ *     复式 / 胆拖：优化【号码池】——让池子展开后的所有组合平均拥挤度最低、
+ *                 踩中 P0/P1 与形态要求的比例最小
  * ============================================================ */
 (function (root) {
   'use strict';
@@ -657,7 +659,7 @@
   }
 
   /* ---------- 「它为什么不拥挤」说明 ---------- */
-  function explain(combo, ctx, parts, hotPool) {
+  function explain(combo, ctx, parts, hotPool, selfSet) {
     var c = ctx.c, reasons = [];
     var coldHigh = combo.filter(function (n) { return n > BIRTHDAY_MAX; }).length;
     if (coldHigh >= 1) reasons.push(coldHigh + ' 个号码落在 ' + (BIRTHDAY_MAX + 1) + '+ 的非生日段');
@@ -666,6 +668,9 @@
     var hits = poolHit(combo, hotPool);
     if (hits === 0) reasons.push('与本期热门号池零命中');
     else if (hits <= 1) reasons.push('仅 ' + hits + ' 个号与热门池重合');
+    if (selfSet && selfSet.count && poolHit(combo, selfSet) === 0) {
+      reasons.push('与自己填的历史自买号零重合');
+    }
     var run = longestRun(combo);
     if (run < 2) reasons.push('无连号');
     if (maxSameTail(combo) < 2) reasons.push('无同尾号');
@@ -677,7 +682,7 @@
 
   /* ============================================================
    * 8. 出号：加权随机抽样 → 分层
-   *   2 注全权重 · 2 注权重开方 · 1 注近乎均匀
+   *   按总注数自适应均分：能整除则 1:1:1，余数补给 全权重 → 开方 → 均匀
    * ========================================================== */
 
   var TIERS = [
@@ -685,6 +690,16 @@
     { key: 'sqrt', label: '权重开方', desc: '压低强弱差距，覆盖面更宽' },
     { key: 'uniform', label: '近乎均匀', desc: '接近均匀抽样，兜底防扎堆' }
   ];
+
+  // 总注数自适应均分到三层：能整除则三等分，余数依次补给 全权重 → 开方 → 均匀
+  function splitEven(total) {
+    var n = Math.max(1, total | 0);
+    var base = Math.floor(n / TIERS.length);
+    var plan = {};
+    TIERS.forEach(function (t) { plan[t.key] = base; });
+    for (var i = 0; i < n % TIERS.length; i++) plan[TIERS[i].key]++;
+    return plan;
+  }
 
   // 归一化
   function normalize(w) {
@@ -720,7 +735,7 @@
    * opts: {
    *   seed, halflife, window,
    *   hotPool (text), luck (text), events (text), date,
-   *   tiers: {full, sqrt, uniform}, crowdMax,
+   *   tiers: {full, sqrt, uniform}（缺省时按 tickets 自适应均分）, tickets, crowdMax,
    *   recentDraws, avoid (避拥挤强度 gamma), maxOverlap
    * }
    */
@@ -732,11 +747,12 @@
     var rnd = LC.mulberry32(seed);
     var gamma = opts.avoid == null ? 3 : opts.avoid;
 
-    // 分层配比：默认 2 / 2 / 1
+    // 分层配比：优先用调用方给定的 tiers，否则按 tickets 自适应均分（缺省 5 注 → 2 / 2 / 1）
+    var fallback = splitEven(opts.tickets == null ? 5 : opts.tickets);
     var plan = {
-      full: opts.tiers && opts.tiers.full != null ? Math.max(0, opts.tiers.full | 0) : 2,
-      sqrt: opts.tiers && opts.tiers.sqrt != null ? Math.max(0, opts.tiers.sqrt | 0) : 2,
-      uniform: opts.tiers && opts.tiers.uniform != null ? Math.max(0, opts.tiers.uniform | 0) : 1
+      full: opts.tiers && opts.tiers.full != null ? Math.max(0, opts.tiers.full | 0) : fallback.full,
+      sqrt: opts.tiers && opts.tiers.sqrt != null ? Math.max(0, opts.tiers.sqrt | 0) : fallback.sqrt,
+      uniform: opts.tiers && opts.tiers.uniform != null ? Math.max(0, opts.tiers.uniform | 0) : fallback.uniform
     };
     var totalTickets = plan.full + plan.sqrt + plan.uniform;
     if (totalTickets <= 0) { plan.full = 1; totalTickets = 1; }
@@ -808,8 +824,8 @@
         structure: feat,
         features: feat,
         repeat: cand.hf.repeat,
-        explanation: explain(cand.combo, ctx, cand.cs.parts, hotPool),
-        checks: buildChecks(cand.combo, cand.hf, cand.sf, hotPool)
+        explanation: explain(cand.combo, ctx, cand.cs.parts, hotPool, selfSet),
+        checks: buildChecks(cand.combo, cand.hf, cand.sf, hotPool, selfSet)
       };
     }
 
@@ -859,7 +875,10 @@
     // E5 奖池派奖：仅作为提示交给"纪律模块"
     var notes = [];
     nc.calendar.notes.forEach(function (x) { notes.push(x); });
+    var evtCount = Object.keys(nc.events).length;
+    if (evtCount) notes.push('实时事件（E2）命中 ' + evtCount + ' 个号，与日历项叠加后调整拥挤度封顶 ±10%');
     if (hotPool.count) notes.push('热门号池收录 ' + hotPool.count + ' 个号（网络 + 手工双来源）');
+    if (selfSet.count) notes.push('历史自买（P4）' + selfSet.count + ' 个号：新号与其重合 ≥5 个作废');
     if (luckMain.sources.length) {
       notes.push('运气源 ' + luckMain.sources.length + ' 条，按半衰期 ' +
         LUCK_HALFLIFE_DAYS + ' 天衰减、单号封顶 +' + LUCK_CAP.toFixed(1));
@@ -906,27 +925,407 @@
     };
   }
 
-  function buildChecks(combo, hf, sf, hotPool) {
+  function buildChecks(combo, hf, sf, hotPool, selfSet) {
     var hits = poolHit(combo, hotPool);
+    var selfHits = (selfSet && selfSet.count) ? poolHit(combo, selfSet) : 0;
     return {
       P0: hf.repeat < 3,
       P1: hf.pass,
       P2: true,                                  // P2 以拥挤度体现，不作硬排除
       P3: hits < 5,                              // 热门池撞 ≥5 才作废
-      P4: true,
+      P4: selfHits < 5,                          // 历史自买撞 ≥5 才作废（未填写时恒成立）
       structure: sf.pass,
       repeat: hf.repeat,
       run: hf.run,
       tailMax: hf.tailMax,
-      poolHits: hits
+      poolHits: hits,
+      selfHits: selfHits
     };
   }
 
   /* ============================================================
-   * 9. 对外接口
+   * 9. 号码池：复式 / 胆拖
+   *
+   *   单式的评价单元是"一注"，所以能逐注硬作废、用注间撞号拉开距离。
+   *   复式 / 胆拖买的是"一批号码"：一张复式票展开成 C(m,k) 注，每注拥挤度
+   *   各不相同，票面没有单一拥挤度，也没法把其中某几注剔除。于是换一个
+   *   目标函数 —— 优化【号码池】，让池子展开后的所有组合
+   *     ① 平均拥挤度最低；
+   *     ② 踩中 P0/P1 与【形态要求】的比例最小。
+   *   搜索方式：从"低拥挤号加权抽样"出发做局部搜索（换号，胆拖再加胆拖换位），
+   *   以展开组合的平均代价为唯一判据；随机种子只决定起点，
+   *   因此同一套参数下"换一批"结果可复现。
+   * ========================================================== */
+
+  // 展开后某一注的代价 = 拥挤度 + 作废惩罚（单位与拥挤度一致，0–100+）
+  //   实测（双色球主区 10 个号 / 展开 210 注）：
+  //     无惩罚 → 最冷 10 号池 100% 全大硬作废
+  //     22/10 → 平均拥挤度 28.0~31.5，形态越界 11~17%
+  //     40/18 → 平均拥挤度 28.1~31.6，形态越界 12~14%（更稳定）
+  //     100/50 → 平均拥挤度 29.7~32.9，形态越界 9~10%（收益递减）
+  //   取 40/18：拥挤度代价仅 +0.1~0.7，换来更低的越界率与更小的方差。
+  var POOL_PENALTY = { hard: 40, structure: 18 };
+  // 局部搜索预算：单次搜索的毫秒上限与最大轮数，保证面板不卡顿
+  var POOL_BUDGET_MS = 320;
+  var POOL_PASSES = 8;
+  var POOL_SUBSET_CAP = 6000;
+
+  function ascNum(a, b) { return a - b; }
+
+  function intOr(v, dflt) {
+    if (v == null || v === '') return dflt;
+    var n = Math.round(Number(v));
+    return isFinite(n) ? n : dflt;
+  }
+
+  // 枚举 arr 的 k 元子集（arr 升序 → 结果升序），超出上限即截断
+  function kSubsets(arr, k) {
+    var out = [], n = arr.length;
+    if (k < 0 || k > n) return out;
+    if (k === 0) return [[]];
+    var idx = new Array(k);
+    (function rec(start, depth) {
+      if (out.length >= POOL_SUBSET_CAP) return;
+      if (depth === k) { out.push(idx.map(function (i) { return arr[i]; })); return; }
+      for (var i = start; i <= n - (k - depth); i++) {
+        idx[depth] = i;
+        rec(i + 1, depth + 1);
+        if (out.length >= POOL_SUBSET_CAP) return;
+      }
+    })(0, 0);
+    return out;
+  }
+
+  // 池子展开后的统一口径统计
+  function poolStats(rows, threshold) {
+    var n = rows.length, sum = 0, min = Infinity, max = -Infinity;
+    var over = 0, hard = 0, struct = 0, selfBad = 0, scores = [];
+    var parts = { number: 0, pattern: 0, popular: 0, pool: 0, history: 0 };
+    rows.forEach(function (r) {
+      sum += r.score;
+      scores.push(r.score);
+      if (r.score < min) min = r.score;
+      if (r.score > max) max = r.score;
+      if (r.score > threshold) over++;
+      if (!r.hard) hard++;
+      else if (!r.struct) struct++;
+      if (r.selfBad) selfBad++;
+      Object.keys(parts).forEach(function (k) { parts[k] += (r.parts[k] || 0); });
+    });
+    scores.sort(ascNum);
+    Object.keys(parts).forEach(function (k) { parts[k] = n ? parts[k] / n : 0; });
+    return {
+      count: n,
+      combos: n,                     // 主区展开注数（不含特别区展开）
+      mean: n ? sum / n : 0,
+      min: n ? min : 0,
+      max: n ? max : 0,
+      p90: n ? scores[Math.min(n - 1, Math.floor(n * 0.9))] : 0,
+      over: over,
+      hardInvalid: hard,
+      structInvalid: struct,
+      selfInvalid: selfBad,          // 因 P4 历史自买重合 ≥5 而作废的注数
+      passRate: n ? 1 - (hard + struct) / n : 0,
+      parts: parts
+    };
+  }
+
+  // 展开后某一注的代价：拥挤度 + 作废惩罚（可顺便采集明细）
+  //   P4 历史自买（selfSet）与 P0/P1 一样按"硬作废"处理，计入 hard 惩罚
+  function poolRow(combo, ctx, nc, hotPool, selfSet) {
+    var cs = crowdScore(combo, ctx, nc.map, hotPool);
+    var hf = hardFilters(combo, ctx);
+    var selfHits = (selfSet && selfSet.count) ? poolHit(combo, selfSet) : 0;
+    var selfBad = selfHits >= 5;
+    var okHard = hf.pass && !selfBad;
+    var okStruct = okHard ? structureFilters(combo, ctx).pass : false;
+    var cost = cs.score;
+    if (!okHard) cost += POOL_PENALTY.hard;
+    else if (!okStruct) cost += POOL_PENALTY.structure;
+    return {
+      cost: cost, score: cs.score, parts: cs.parts,
+      hard: okHard, struct: okStruct, selfBad: selfBad, selfHits: selfHits
+    };
+  }
+
+  // 造一个"选号集合 → 展开组合平均代价"的求值器
+  //   sel = { dan: [...], tuo: [...] }；复式时 dan 为空，tuo 即号码池
+  //   need = 每注要从拖码里取几个（复式 = mainCount；胆拖 = mainCount - 胆码数）
+  function makePoolEvaluator(ctx, nc, hotPool, need, selfSet) {
+    var evals = 0;
+    function combosOf(sel) {
+      return kSubsets(sel.tuo, need).map(function (t) {
+        return sel.dan.length ? sel.dan.concat(t).sort(ascNum) : t;
+      });
+    }
+    function evaluate(sel, collect) {
+      var combos = combosOf(sel);
+      var total = 0, rows = collect ? [] : null;
+      for (var i = 0; i < combos.length; i++) {
+        var r = poolRow(combos[i], ctx, nc, hotPool, selfSet);
+        total += r.cost;
+        evals++;
+        if (rows) rows.push(r);
+      }
+      return { mean: combos.length ? total / combos.length : 0, rows: rows, n: combos.length };
+    }
+    return {
+      evaluate: evaluate,
+      combosOf: combosOf,
+      evals: function () { return evals; }
+    };
+  }
+
+  // 局部搜索：换号（+ 胆拖换位），最小化展开组合的平均代价
+  function searchPool(numPool, start, ev) {
+    var cur = { dan: start.dan.slice(), tuo: start.tuo.slice() };
+    var curEval = ev.evaluate(cur, false);
+    var best = cur, bestEval = curEval;
+    var t0 = Date.now();
+    var passes = 0;
+
+    function inSet(sel, n) {
+      return sel.dan.indexOf(n) >= 0 || sel.tuo.indexOf(n) >= 0;
+    }
+    function outOfBudget() { return Date.now() - t0 > POOL_BUDGET_MS; }
+
+    while (passes < POOL_PASSES) {
+      passes++;
+      var improved = false;
+      // ① 换号：池内某个号 → 池外某个号
+      var keys = cur.dan.length ? ['dan', 'tuo'] : ['tuo'];
+      for (var ki = 0; ki < keys.length; ki++) {
+        var key = keys[ki];
+        for (var oi = 0; oi < cur[key].length; oi++) {
+          for (var ni = 0; ni < numPool.length; ni++) {
+            var cand = numPool[ni];
+            if (inSet(cur, cand)) continue;
+            var trial = { dan: cur.dan.slice(), tuo: cur.tuo.slice() };
+            trial[key][oi] = cand;
+            var r = ev.evaluate(trial, false);
+            if (r.mean < curEval.mean - 1e-9) {
+              cur = trial; curEval = r; improved = true;
+              if (r.mean < bestEval.mean) { best = trial; bestEval = r; }
+            }
+            if (outOfBudget()) return { sel: best, ev: bestEval };
+          }
+        }
+      }
+      // ② 胆拖换位：胆码进每一注，位置比拖码"贵"，换位往往能显著降代价
+      if (cur.dan.length && cur.tuo.length) {
+        for (var di = 0; di < cur.dan.length; di++) {
+          for (var ti = 0; ti < cur.tuo.length; ti++) {
+            var sw = { dan: cur.dan.slice(), tuo: cur.tuo.slice() };
+            var tmp = sw.dan[di]; sw.dan[di] = sw.tuo[ti]; sw.tuo[ti] = tmp;
+            var rs = ev.evaluate(sw, false);
+            if (rs.mean < curEval.mean - 1e-9) {
+              cur = sw; curEval = rs; improved = true;
+              if (rs.mean < bestEval.mean) { best = sw; bestEval = rs; }
+            }
+            if (outOfBudget()) return { sel: best, ev: bestEval };
+          }
+        }
+      }
+      if (!improved) break;
+    }
+    return { sel: best, ev: bestEval };
+  }
+
+  // 初始池：按避拥挤权重（低拥挤优先）做一次可复现的加权无放回抽样
+  function samplePool(nc, luckMap, gamma, m, rnd) {
+    var w = nc.list.map(function (o) {
+      return Math.exp(-gamma * o.crowd) * (1 + (luckMap[o.num] || 0));
+    });
+    return weightedSample(w, m, rnd)
+      .map(function (i) { return nc.list[i].num; })
+      .sort(ascNum);
+  }
+
+  /**
+   * 生成避拥挤【号码池】（复式 / 胆拖）
+   * opts: {
+   *   seed, window, halflife, date, hotPool, luck, events,
+   *   crowdMax, avoid,
+   *   betType: 'compound' | 'dantuo',
+   *   mainSel, specialSel,                       // 复式：选号个数
+   *   dtForm, danCount, tuoCount, sDanCount, sTuoCount   // 胆拖
+   * }
+   */
+  function buildPool(kind, opts) {
+    opts = opts || {};
+    var c = LC.cfg(kind);
+    var all = LC.draws(kind);
+    var seed = opts.seed || (Date.now() & 0x7fffffff);
+    var rnd = LC.mulberry32(seed);
+    var gamma = opts.avoid == null ? 3 : opts.avoid;
+    var threshold = opts.crowdMax == null ? 60 : opts.crowdMax;
+    var mainPoolSize = c.mainMax - c.mainMin + 1;
+    var specPoolSize = c.specialMax - c.specialMin + 1;
+    var k = c.mainCount, sk = c.specialCount;
+
+    var ctx = buildContext(kind, opts);
+    var nc = buildNumberCrowd(kind, opts);
+    var sc = buildSpecialCrowd(kind, opts);
+    var hotPool = parseHotPool(kind, opts.hotPool);
+    var selfSet = parseHotPool(kind, opts.selfPick);
+    var luckMain = luckBoost(kind, opts.luck, c.mainMin, c.mainMax);
+    var luckSpec = luckBoost(kind, opts.luck, c.specialMin, c.specialMax);
+
+    var betType = opts.betType === 'dantuo' ? 'dantuo' : 'compound';
+    var form = betType === 'dantuo'
+      ? (opts.dtForm === 'special' || opts.dtForm === 'both' ? opts.dtForm : 'main')
+      : null;
+
+    // 组号方式：与 model.js/betOptions 的口径一致，这里只做安全钳制
+    var mainSel = clamp(intOr(opts.mainSel, k + 1), k, Math.min(k + 4, mainPoolSize));
+    var specialSel = clamp(intOr(opts.specialSel, sk), sk, Math.min(sk + 3, specPoolSize));
+    var danCount = 0, tuoCount = 0;
+    if (betType === 'dantuo' && form !== 'special') {
+      danCount = clamp(intOr(opts.danCount, 1), 1, Math.max(k - 1, 1));
+      var tuoMin = Math.max(k + 1 - danCount, 1);      // 官方：胆 + 拖 ≥ 基本号码数 + 1
+      tuoCount = clamp(intOr(opts.tuoCount, tuoMin), tuoMin, mainPoolSize - danCount);
+    }
+    var sDanCount = 0, sTuoCount = 0;
+    if (betType === 'dantuo' && form !== 'main') {
+      sDanCount = 1;                                   // 官方固定 1 个特别区胆码
+      sTuoCount = clamp(intOr(opts.sTuoCount, sk), sk, specPoolSize - sDanCount);
+    }
+
+    // 主区：池子多大、每注要从拖码里补几个
+    var poolSize, need;
+    if (form === 'special') {
+      poolSize = k; need = k; danCount = 0; tuoCount = k;   // 主区不设胆拖，直接选满
+    } else if (betType === 'dantuo') {
+      poolSize = danCount + tuoCount; need = k - danCount;
+    } else {
+      poolSize = mainSel; need = k; danCount = 0; tuoCount = mainSel;
+    }
+
+    // 起点：低拥挤加权抽样；胆拖时把池里最冷的 danCount 个放进胆码
+    var startNums = samplePool(nc, luckMain.map, gamma, poolSize, rnd);
+    var start = { dan: [], tuo: startNums };
+    if (danCount) {
+      var byCrowd = startNums.slice().sort(function (a, b) {
+        return (nc.map[a] || 0) - (nc.map[b] || 0);
+      });
+      start.dan = byCrowd.slice(0, danCount).sort(ascNum);
+      start.tuo = byCrowd.slice(danCount).sort(ascNum);
+    }
+
+    var ev = makePoolEvaluator(ctx, nc, hotPool, need, selfSet);
+    var numPool = nc.list.map(function (o) { return o.num; });   // 按拥挤度升序
+    var found = searchPool(numPool, start, ev);
+    var finalSel = found.sel;
+    var finEval = ev.evaluate(finalSel, true);
+    var stats = poolStats(finEval.rows, threshold);
+
+    // 特别区：每个号在各注中出现次数相同，取最冷的若干个即为最优解
+    var specialCount = (!form || form === 'main') ? specialSel : (sDanCount + sTuoCount);
+    var specialNums = sc.list.slice(0, specialCount).map(function (o) { return o.num; }).sort(ascNum);
+    var sDan = sDanCount ? specialNums.slice(0, sDanCount).sort(ascNum) : [];
+    var sTuo = sDanCount ? specialNums.slice(sDanCount).sort(ascNum) : [];
+
+    // 注数：与 app 的 betPreview 口径一致
+    var mainCombos, specCombos;
+    if (betType === 'compound') {
+      mainCombos = LC.comb(mainSel, k);
+      specCombos = LC.comb(specialSel, sk);
+    } else if (form === 'special') {
+      mainCombos = 1;
+      specCombos = LC.comb(sTuoCount, sk - sDanCount);
+    } else if (form === 'both') {
+      mainCombos = LC.comb(tuoCount, k - danCount);
+      specCombos = LC.comb(sTuoCount, sk - sDanCount);
+    } else {
+      mainCombos = LC.comb(tuoCount, k - danCount);
+      specCombos = LC.comb(specialSel, sk);
+    }
+    var combos = mainCombos * specCombos;
+
+    var mainNums = finalSel.dan.concat(finalSel.tuo).sort(ascNum);
+    function detailOf(nums, roleOf) {
+      return nums.map(function (n) {
+        var o = nc.list.filter(function (x) { return x.num === n; })[0];
+        return {
+          num: n, crowd: o.crowd, parts: o.parts, rank: o.rank, role: roleOf(n)
+        };
+      });
+    }
+    var mainDetail = detailOf(mainNums, function (n) {
+      if (finalSel.dan.indexOf(n) >= 0) return 'dan';
+      return danCount ? 'tuo' : 'main';
+    });
+    var specialDetail = specialNums.map(function (n) {
+      var o = sc.list.filter(function (x) { return x.num === n; })[0];
+      return {
+        num: n, crowd: o.crowd, parts: o.parts, rank: o.rank,
+        role: sDan.indexOf(n) >= 0 ? 'sDan' : (sDanCount ? 'sTuo' : 'special')
+      };
+    });
+
+    // E5 奖池派奖：与单式一致，仅作为提示交给"纪律模块"
+    var notes = [];
+    nc.calendar.notes.forEach(function (x) { notes.push(x); });
+    var evtCount = Object.keys(nc.events).length;
+    if (evtCount) notes.push('实时事件（E2）命中 ' + evtCount + ' 个号，与日历项叠加后调整拥挤度封顶 ±10%');
+    if (hotPool.count) notes.push('热门号池收录 ' + hotPool.count + ' 个号（网络 + 手工双来源）');
+    if (selfSet.count) {
+      notes.push('历史自买（P4）' + selfSet.count +
+        ' 个号：池内展开后有 ' + stats.selfInvalid + ' 注与其重合 ≥5 个，已按硬作废计入代价');
+    }
+    if (luckMain.sources.length) {
+      notes.push('运气源 ' + luckMain.sources.length + ' 条，按半衰期 ' +
+        LUCK_HALFLIFE_DAYS + ' 天衰减、单号封顶 +' + LUCK_CAP.toFixed(1));
+    }
+    notes.push('复式 / 胆拖无法逐注剔除，池内目标是"展开后的平均拥挤度最低、作废比例最小"');
+
+    return {
+      strategy: 'crowd',
+      mode: 'pool',
+      kind: kind,
+      config: c,
+      seed: seed,
+      threshold: threshold,
+      avoid: gamma,
+      betType: betType,
+      dtForm: form,
+      counts: {
+        mainSel: mainSel, specialSel: specialSel,
+        danCount: danCount, tuoCount: tuoCount,
+        sDanCount: sDanCount, sTuoCount: sTuoCount
+      },
+      pool: { main: mainNums, special: specialNums },
+      dan: finalSel.dan.slice().sort(ascNum),
+      tuo: finalSel.tuo.slice().sort(ascNum),
+      sDan: sDan, sTuo: sTuo,
+      mainDetail: mainDetail,
+      specialDetail: specialDetail,
+      need: need,
+      bet: { combos: combos, mainCombos: mainCombos, specCombos: specCombos, yuanPerBet: 2 },
+      expanded: stats,
+      poolCrowd: nc.list,                 // 拥挤度从低到高
+      specialCrowd: sc.list,
+      hotPool: hotPool,
+      selfPick: selfSet,
+      luck: { main: luckMain, special: luckSpec },
+      calendar: nc.calendar,
+      events: nc.events,
+      notes: notes,
+      attempts: ev.evals(),
+      windowSize: nc.list.length,
+      latest: all[all.length - 1],
+      prevMain: ctx.prevMain,
+      sumMu: ctx.sumMu,
+      sumSd: ctx.sumSd
+    };
+  }
+
+  /* ============================================================
+   * 10. 对外接口
    * ========================================================== */
   root.LCrowd = {
     generate: generate,
+    buildPool: buildPool,
     buildNumberCrowd: buildNumberCrowd,
     buildSpecialCrowd: buildSpecialCrowd,
     buildContext: buildContext,
@@ -943,6 +1342,7 @@
     isArithmetic: isArithmetic,
     isSymmetric: isSymmetric,
     CROWD_WEIGHTS: CROWD_WEIGHTS,
+    POOL_PENALTY: POOL_PENALTY,
     TIERS: TIERS
   };
 })(window);
