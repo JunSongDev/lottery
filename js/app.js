@@ -4,7 +4,8 @@
  * ============================================================ */
 (function () {
   'use strict';
-  var LC = window.LC, LS = window.LS, LT = window.LT, LM = window.LM, Charts = window.Charts;
+  var LC = window.LC, LS = window.LS, LT = window.LT, LM = window.LM,
+    LCrowd = window.LCrowd, Charts = window.Charts;
 
   var state = {
     kind: 'ssq',
@@ -20,6 +21,14 @@
     sTuoCount: null,     // 特别区（后区）拖码个数，胆码由官方规则固定为 1 个
     halflife: 30,
     seed: null,
+    // 「避拥挤」出号策略（对应 require.md）
+    strategy: 'crowd',   // crowd 避拥挤出号 / score 多因子评分
+    tierFull: 2,         // 全权重注数
+    tierSqrt: 2,         // 权重开方注数
+    tierUniform: 1,      // 近乎均匀注数
+    crowdMax: 60,        // 拥挤度上限，超过者不许输出
+    hotPool: '',         // 热门号池（网络 + 手工双来源）
+    luck: '',            // 运气源（每行一条，可带日期前缀）
     cache: {}
   };
 
@@ -34,6 +43,37 @@
     omission: { name: '遗漏回归', color: '#f59e0b', desc: '按历史经验，处于当前遗漏期数区间的号码出现率提升' },
     hot: { name: '近期热度', color: '#ef4444', desc: '指数加权移动平均衡量的近期活跃度' },
     transition: { name: '转移关联', color: '#10b981', desc: '与上期开出号码的马尔可夫共现强度' }
+  };
+
+  // 推荐策略：默认走「避拥挤」（对应 require.md）
+  var STRATEGY_META = [
+    {
+      v: 'crowd', label: '避拥挤出号',
+      desc: '不预测中奖号码，只避开大众扎堆的号与形态，降低中奖后的奖金分摊'
+    },
+    {
+      v: 'score', label: '多因子评分',
+      desc: '按历史统计因子加权评分排序，回测显示其不具备预测力'
+    }
+  ];
+
+  // 组合拥挤度的五个维度（与 crowd.js 的 CROWD_WEIGHTS 一一对应）
+  var CROWD_PART_META = {
+    number: { name: '号码本身', color: '#6366f1', desc: '号码是否属于生日号 / 吉利尾 / 上期开出 / 长期热号' },
+    pattern: { name: '形态扎堆', color: '#f59e0b', desc: '连号、同尾、等差、对称等"看起来有规律"的图形' },
+    popular: { name: '大众偏好', color: '#ef4444', desc: '≤31 生日号扎堆、6/8/9 谐音凑堆、整体偏小号' },
+    pool: { name: '热门池命中', color: '#db2777', desc: '与本期收录的热门号池（AI / 主播 / 热搜）重合程度' },
+    history: { name: '历史重合', color: '#10b981', desc: '与近 30 期开出号码的平均重合度' }
+  };
+
+  // 单号拥挤度的六个来源
+  var NUM_PART_META = {
+    birthday: { name: '生日号偏好', color: '#f59e0b' },
+    lucky: { name: '吉利尾数', color: '#ef4444' },
+    small: { name: '小号偏好', color: '#a78bfa' },
+    hot: { name: '长期热度', color: '#fb923c' },
+    last: { name: '上期开出', color: '#db2777' },
+    env: { name: '环境因子', color: '#06b6d4' }
   };
 
   var WINDOWS = [
@@ -83,7 +123,10 @@
     $('#latest').innerHTML =
       '<div class="latest-head">' +
       '<span class="latest-issue">第 ' + last.i + ' 期</span>' +
-      '<span class="latest-date">' + last.d + '</span>' +
+      '<button class="latest-date" id="btn-history" type="button" ' +
+      'aria-label="查询历史开奖记录">' +
+      '<span>' + last.d + '</span><i class="caret">›</i>' +
+      '</button>' +
       '</div>' +
       '<div class="latest-balls">' + ballsHtml(last.r, 'main') +
       '<span class="ball-sep">+</span>' + ballsHtml(last.b, 'special') + '</div>' +
@@ -93,7 +136,12 @@
       '<span>奇偶 <b>' + odd + ':' + (c.mainCount - odd) + '</b></span>' +
       '<span>大小 <b>' + big + ':' + (c.mainCount - big) + '</b></span>' +
       '<span>重号 <b>' + repeat + '</b></span>' +
-      '</div>';
+      '</div>' +
+      '<button class="latest-history-link" id="btn-history-2" type="button">' +
+      '查询历史开奖记录（共 ' + all.length + ' 期）</button>';
+
+    $('#btn-history').addEventListener('click', function () { showHistoryPage(); });
+    $('#btn-history-2').addEventListener('click', function () { showHistoryPage(); });
   }
 
   /* ============================================================
@@ -159,37 +207,72 @@
     var seed = state.seed || (state.seed = (Date.now() & 0x7fffffff));
     var kind = state.kind;
     var params = betParams();
-    // 复式/胆拖是确定性输出，不随种子变化
-    var key = kind + '|' + state.window + '|' + state.halflife + '|' +
+    // 「避拥挤」只在单式下生效；复式 / 胆拖仍走多因子评分（确定性输出）
+    var useCrowd = state.strategy === 'crowd' && params.betType === 'single';
+    var key = kind + '|' + state.window + '|' + state.halflife + '|' + state.strategy + '|' +
       [params.betType, params.dtForm, params.mainSel, params.specialSel,
         params.danCount, params.tuoCount, params.sDanCount, params.sTuoCount,
         params.tickets].join(',') +
-      '|' + (params.betType === 'single' ? seed : 'det');
+      '|' + state.hotPool + '|' + state.luck + '|' + crowdPlanKey() + '|' + state.crowdMax +
+      '|' + ((useCrowd || params.betType === 'single') ? seed : 'det');
     if (forceNewSeed) delete state.cache[key];
     if (!state.cache[key]) {
-      var opt = {
-        window: state.window,
-        halflife: state.halflife,
-        samples: 20000,
-        seed: seed,
-        betType: params.betType
-      };
-      if (params.betType === 'single') {
-        opt.tickets = params.tickets;
+      if (useCrowd) {
+        state.cache[key] = LCrowd.generate(kind, {
+          window: state.window,
+          seed: seed,
+          hotPool: state.hotPool,
+          luck: state.luck,
+          tiers: crowdPlan(),
+          crowdMax: state.crowdMax
+        });
       } else {
-        opt.mainSel = params.mainSel;
-        opt.specialSel = params.specialSel;
-        if (params.betType === 'dantuo') {
-          opt.dtForm = params.dtForm;
-          opt.danCount = params.danCount;
-          opt.tuoCount = params.tuoCount;
-          opt.sDanCount = params.sDanCount;
-          opt.sTuoCount = params.sTuoCount;
+        var opt = {
+          window: state.window,
+          halflife: state.halflife,
+          samples: 20000,
+          seed: seed,
+          betType: params.betType
+        };
+        if (params.betType === 'single') {
+          opt.tickets = params.tickets;
+        } else {
+          opt.mainSel = params.mainSel;
+          opt.specialSel = params.specialSel;
+          if (params.betType === 'dantuo') {
+            opt.dtForm = params.dtForm;
+            opt.danCount = params.danCount;
+            opt.tuoCount = params.tuoCount;
+            opt.sDanCount = params.sDanCount;
+            opt.sTuoCount = params.sTuoCount;
+          }
         }
+        state.cache[key] = LM.recommend(kind, opt);
       }
-      state.cache[key] = LM.recommend(kind, opt);
     }
     return state.cache[key];
+  }
+
+  /* ---------- 避拥挤：出号分层（全权重 / 权重开方 / 近乎均匀） ---------- */
+
+  var TIER_MIN = 0, TIER_MAX = 10;
+
+  function crowdPlan() {
+    return {
+      full: clampNum(state.tierFull, TIER_MIN, TIER_MAX, 2),
+      sqrt: clampNum(state.tierSqrt, TIER_MIN, TIER_MAX, 2),
+      uniform: clampNum(state.tierUniform, TIER_MIN, TIER_MAX, 1)
+    };
+  }
+
+  function crowdPlanKey() {
+    var t = crowdPlan();
+    return t.full + ',' + t.sqrt + ',' + t.uniform;
+  }
+
+  function crowdTotal() {
+    var t = crowdPlan();
+    return t.full + t.sqrt + t.uniform;
   }
 
   /* ---------- 设置区：投注方式与参数 ---------- */
@@ -244,9 +327,16 @@
         : LC.comb(p.sTuoCount, c.specialCount - p.sDanCount);
       combos = mainPart * specPart;
     } else {
-      combos = p.tickets;
+      // 避拥挤策略下注数由出号分层决定，与"推荐注数"无关
+      combos = (state.strategy === 'crowd') ? Math.max(crowdTotal(), 1) : p.tickets;
     }
     return { combos: combos, cost: combos * bo.yuanPerBet };
+  }
+
+  function previewHtml(pv) {
+    return '<div class="bet-preview" id="bet-preview"><span>预计</span><b>' +
+      pv.combos.toLocaleString() + ' 注</b><span>·</span><b>' +
+      pv.cost.toLocaleString() + ' 元</b></div>';
   }
 
   function betParamFields(c, bo, p) {
@@ -299,10 +389,51 @@
         '</div></div>';
     }
     var pv = betPreview(c, bo, p);
-    fields += '<div class="bet-preview" id="bet-preview"><span>预计</span><b>' +
-      pv.combos.toLocaleString() + ' 注</b><span>·</span><b>' +
-      pv.cost.toLocaleString() + ' 元</b></div>';
+    fields += previewHtml(pv);
     return fields;
+  }
+
+  /* ---------- 避拥挤策略：设置区字段 ---------- */
+
+  function crowdTierFields(c, bo) {
+    var plan = crowdPlan();
+    function row(key, label, desc, val) {
+      var chips = '<button class="chip' + (val === 0 ? ' active' : '') +
+        '" data-tier="' + key + '" data-tn="0">不生成</button>';
+      for (var n = 1; n <= 4; n++) {
+        chips += '<button class="chip' + (val === n ? ' active' : '') +
+          '" data-tier="' + key + '" data-tn="' + n + '">' + n + ' 注</button>';
+      }
+      return '<div class="field"><label>' + label + '（' + desc + '）</label>' +
+        '<div class="chips">' + chips + '</div></div>';
+    }
+    return row('full', '全权重注数', '完全按避拥挤权重抽样', plan.full) +
+      row('sqrt', '权重开方注数', '对权重开平方，压低强弱差距', plan.sqrt) +
+      row('uniform', '近乎均匀注数', '接近均匀抽样，兜底防扎堆', plan.uniform) +
+      previewHtml(betPreview(c, bo, betParams()));
+  }
+
+  function crowdThresholdField() {
+    var opts = [45, 50, 55, 60];
+    var chips = opts.map(function (n) {
+      return '<button class="chip' + (state.crowdMax === n ? ' active' : '') +
+        '" data-crowdmax="' + n + '">≤ ' + n + '</button>';
+    }).join('');
+    return '<div class="field"><label>拥挤度上限（超过即重新抽样，越低越保守）</label>' +
+      '<div class="chips">' + chips + '</div></div>';
+  }
+
+  function crowdSourceFields() {
+    return '<div class="field"><label>热门号池（AI 荐号 / 主播 / 群聊合买 / 热搜数字，空格或逗号分隔）</label>' +
+      '<textarea id="hotpool-input" class="ta" rows="2" ' +
+      'placeholder="例如：8 18 28 33">' + esc(state.hotPool) + '</textarea>' +
+      '<p class="hint">P3 拥挤黑名单：命中 ≥5 个直接作废，命中越少拥挤度越低。</p></div>' +
+      '<div class="field"><label>运气源（每行一条，可在行首写日期 YYYY-MM-DD）</label>' +
+      '<textarea id="luck-input" class="ta" rows="3" ' +
+      'placeholder="2026-09-12 大奖得主球衣 39 号&#10;暴涨代码 0.618&#10;锦鲤序号 88">' +
+      esc(state.luck) + '</textarea>' +
+      '<p class="hint">L 欧气因子：本体 · 数位 · 取模 · 数根 · 邻域 · 日期拆解 · 小数缩减 七条映射，' +
+      '半衰期 7 天、单号封顶 +3.0，全来源叠加后用于加权抽样。</p></div>';
   }
 
   /* ---------- 单式注数：快捷芯片与自定义输入框的联动 ---------- */
@@ -499,18 +630,21 @@
   if (window.addEventListener) {
     window.addEventListener('popstate', function (e) {
       var st = e.state || {};
-      if (st.lottoPage === 'rec-result' && !activePage()) {
-        historyPushed = true;                 // 前进：恢复二级页
-        showResultPage(null, { noHistory: true });
-      } else if (!st.lottoPage && activePage()) {
+      if (!st.lottoPage && activePage()) {
         historyPushed = false;                // 返回：收起二级页
         popPage();
+      } else if (st.lottoPage && !activePage()) {
+        // 前进：按历史记录里的页面名恢复对应的二级页
+        historyPushed = true;
+        if (st.lottoPage === 'draw-history') showHistoryPage({ noHistory: true });
+        else showResultPage(null, { noHistory: true });
       }
     });
   }
 
   // 二级页标题：胆拖要区分主区 / 特别区 / 双区
   function recBetLabel(p) {
+    if (state.strategy === 'crowd' && p.betType === 'single') return '避拥挤';
     if (p.betType === 'dantuo') return LM.dtFormLabel(state.kind, p.dtForm);
     return betLabel(p.betType);
   }
@@ -567,6 +701,150 @@
     }, 20);
   }
 
+  /* ---------- 二级页：历史开奖记录 ---------- */
+
+  var HIST_CHUNK = 40;                    // 每批渲染条数，避免一次性插入几千个节点
+  var hist = { q: '', shown: 0, items: null };
+
+  // 期号 / 日期关键词归一化：「第 2026105 期」「2026 09 10」都能查
+  function histNorm(q) { return String(q || '').replace(/[第期\s]/g, ''); }
+
+  // 按期号倒序取出开奖记录，并附带"上一期"（用于计算重号）
+  function histItems(kind, q) {
+    var all = LC.draws(kind);
+    var s = histNorm(q);
+    var out = [];
+    for (var i = all.length - 1; i >= 0; i--) {
+      var dr = all[i];
+      if (s && String(dr.i).indexOf(s) < 0 && dr.d.indexOf(s) < 0) continue;
+      out.push({ dr: dr, prev: i > 0 ? all[i - 1] : null });
+    }
+    return out;
+  }
+
+  function histRowHtml(c, dr, prev) {
+    var sum = LC.sum(dr.r);
+    var odd = LC.oddCount(dr.r);
+    var big = LC.bigCount(dr.r, c);
+    var repeat = prev ? LC.repeatCount(dr.r, prev.r) : 0;
+    return '<div class="hist-row">' +
+      '<div class="hist-row-head">' +
+      '<span class="latest-issue">第 ' + dr.i + ' 期</span>' +
+      '<span class="hist-date">' + dr.d + '</span>' +
+      '</div>' +
+      '<div class="latest-balls">' + ballsHtml(dr.r, 'main') +
+      '<span class="ball-sep">+</span>' + ballsHtml(dr.b, 'special') + '</div>' +
+      '<div class="latest-metrics">' +
+      '<span>和值 <b>' + sum + '</b></span>' +
+      '<span>跨度 <b>' + LC.span(dr.r) + '</b></span>' +
+      '<span>奇偶 <b>' + odd + ':' + (c.mainCount - odd) + '</b></span>' +
+      '<span>大小 <b>' + big + ':' + (c.mainCount - big) + '</b></span>' +
+      '<span>重号 <b>' + repeat + '</b></span>' +
+      '</div>' +
+      '</div>';
+  }
+
+  function historyPageHtml(c) {
+    var all = LC.draws(state.kind);
+    return '<header class="page-nav">' +
+      '<button class="back-btn" id="btn-back" aria-label="返回">‹</button>' +
+      '<div class="page-nav-text">' +
+      '<b>历史开奖记录</b>' +
+      '<span>' + c.name + ' · 共 ' + all.length + ' 期 · ' +
+      all[0].d + ' ~ ' + all[all.length - 1].d + '</span>' +
+      '</div>' +
+      '</header>' +
+      '<div class="page-actions">' +
+      '<div class="hist-search">' +
+      '<input id="hist-input" type="search" class="search-input" ' +
+      'placeholder="按期号或日期查询，如 2026105 / 2026-09-10">' +
+      '<button class="btn-ghost" id="btn-hist-reset" type="button">清除</button>' +
+      '</div>' +
+      '</div>' +
+      '<div class="page-scroll">' +
+      '<div id="hist-summary"></div>' +
+      '<div id="hist-list"></div>' +
+      '<div class="hist-more" id="hist-more"></div>' +
+      '</div>';
+  }
+
+  // reset=true 重新计算匹配结果并清空列表；否则继续渲染下一批
+  function renderHistList(reset) {
+    var box = $('#hist-list');
+    if (!box) return;
+    var c = LC.cfg(state.kind);
+
+    if (reset) {
+      var input = $('#hist-input');
+      hist.q = input ? input.value : '';
+      hist.items = histItems(state.kind, hist.q);
+      hist.shown = 0;
+      box.innerHTML = '';
+    }
+
+    var items = hist.items || [];
+    var end = Math.min(items.length, hist.shown + HIST_CHUNK);
+    if (end > hist.shown) {
+      box.insertAdjacentHTML('beforeend', items.slice(hist.shown, end).map(function (it) {
+        return histRowHtml(c, it.dr, it.prev);
+      }).join(''));
+      hist.shown = end;
+    }
+
+    var sum = $('#hist-summary');
+    if (sum) {
+      sum.innerHTML = items.length
+        ? '<p class="hint">共匹配 <b>' + items.length + '</b> 期' +
+        (histNorm(hist.q) ? '（关键词：' + esc(histNorm(hist.q)) + '）' : '') +
+        '，已显示 ' + hist.shown + ' 期。' +
+        (histNorm(hist.q) ? '' : '如期号、日期均为官方公布数据。') + '</p>'
+        : '<p class="hint">没有找到匹配「' + esc(hist.q) + '」的开奖记录，' +
+        '可尝试只输入年份（如 2026）或日期片段（如 09-10）。</p>';
+    }
+
+    var more = $('#hist-more');
+    if (more) {
+      more.innerHTML = end < items.length
+        ? '<button class="btn-ghost" id="btn-hist-more" type="button">加载更多（剩余 ' +
+        (items.length - end) + ' 期）</button>'
+        : '';
+      var btn = $('#btn-hist-more');
+      if (btn) btn.addEventListener('click', function () {
+        renderHistList(false);
+        var sc = $('.page-scroll');
+        if (sc && btn.parentNode) {
+          // 加载后把视图滚到新内容起点，避免用户以为"没反应"
+          try { sc.scrollTop = Math.min(sc.scrollTop, sc.scrollHeight); } catch (e) { /* 忽略 */ }
+        }
+      });
+    }
+  }
+
+  function showHistoryPage(opts) {
+    var c = LC.cfg(state.kind);
+    if (!openPage('draw-history', historyPageHtml(c), opts)) return;
+
+    $('#btn-back').addEventListener('click', closePage);
+
+    var input = $('#hist-input');
+    var timer = null;
+    input.addEventListener('input', function () {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(function () { timer = null; renderHistList(true); }, 180);
+    });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); input.blur(); renderHistList(true); }
+    });
+    $('#btn-hist-reset').addEventListener('click', function () {
+      input.value = '';
+      hist.shown = 0;
+      renderHistList(true);
+      input.focus();
+    });
+
+    renderHistList(true);
+  }
+
   /* ---------- 一级界面：分析设置 ---------- */
   function renderRecommend() {
     var panel = $('#panel-recommend');
@@ -584,25 +862,50 @@
         '" data-bet="' + b.v + '">' + b.label + '</button>';
     }).join('');
 
+    var stratChips = STRATEGY_META.map(function (s) {
+      return '<button class="chip' + (state.strategy === s.v ? ' active' : '') +
+        '" data-strategy="' + s.v + '">' + s.label + '</button>';
+    }).join('');
+
+    var stratMeta = STRATEGY_META.filter(function (s) { return s.v === state.strategy; })[0] || STRATEGY_META[0];
+    var isCrowd = state.strategy === 'crowd';
+
     var pv = betPreview(c, bo, p);
+
+    var setupBody =
+      '<div class="field"><label>推荐策略</label><div class="chips">' + stratChips + '</div>' +
+      '<p class="hint">' + esc(stratMeta.desc) + '</p></div>' +
+      '<div class="field"><label>分析样本窗口</label><div class="chips">' + winChips + '</div></div>';
+
+    if (isCrowd) {
+      setupBody +=
+        '<div class="sub-title">出号分层</div>' + crowdTierFields(c, bo) +
+        crowdThresholdField() +
+        '<div class="sub-title">环境（E）与欧气（L）</div>' + crowdSourceFields();
+    } else {
+      setupBody +=
+        '<div class="field"><label>投注方式</label><div class="chips">' + betChips + '</div>' +
+        betNote(c, bo, p) + '</div>' + betParamFields(c, bo, p);
+    }
+
+    var hint = isCrowd
+      ? '避拥挤出号不做任何预测：开奖是独立随机事件，单注中奖概率恒等。它只逐层筛掉大众扎堆的号码与形态，' +
+        '降低中奖后被分摊的人数。全部 ' + LC.draws(state.kind).length +
+        ' 期历史用于 P0 历史同源与形态统计口径。'
+      : '模型使用全部 ' + LC.draws(state.kind).length +
+        ' 期历史数据训练，窗口仅影响结构典型度的统计口径。' +
+        (state.betType === 'single' ? '' : '复式与胆拖按号码综合评分取前 N 名，属于确定性输出。');
 
     var html =
       '<div class="card">' +
       '<div class="card-head"><h3>分析设置</h3></div>' +
-      '<div class="field"><label>分析样本窗口</label><div class="chips">' + winChips + '</div></div>' +
-      '<div class="field"><label>投注方式</label><div class="chips">' + betChips + '</div>' +
-      betNote(c, bo, p) + '</div>' +
-      betParamFields(c, bo, p) +
+      setupBody +
       '</div>' +
       '<div class="gen-bar">' +
       '<div class="gen-sum">本次将生成 <b>' + pv.combos.toLocaleString() + '</b> 注，' +
       '共 <b>' + pv.cost.toLocaleString() + '</b> 元</div>' +
       '<button class="btn-primary" id="btn-generate">生成推荐号码</button>' +
-      '<p class="hint">模型使用全部 ' + LC.draws(state.kind).length +
-      ' 期历史数据训练，窗口仅影响结构典型度的统计口径。' +
-      (state.betType === 'single' ? '' :
-        '复式与胆拖按号码综合评分取前 N 名，属于确定性输出。') +
-      '</p>' +
+      '<p class="hint">' + hint + '</p>' +
       '</div>';
 
     panel.innerHTML = html;
@@ -638,6 +941,47 @@
         renderRecommend();
       });
     });
+    $$('.chips [data-strategy]', panel).forEach(function (b) {
+      b.addEventListener('click', function () {
+        state.strategy = b.dataset.strategy;
+        // 避拥挤只对单式生效，切过去时把投注方式拉回单式
+        if (state.strategy === 'crowd') state.betType = 'single';
+        state.seed = (Date.now() & 0x7fffffff);
+        renderRecommend();
+      });
+    });
+    $$('.chips [data-tier]', panel).forEach(function (b) {
+      b.addEventListener('click', function () {
+        var key = b.dataset.tier, n = Number(b.dataset.tn);
+        if (key === 'full') state.tierFull = n;
+        else if (key === 'sqrt') state.tierSqrt = n;
+        else state.tierUniform = n;
+        state.seed = (Date.now() & 0x7fffffff);
+        renderRecommend();
+      });
+    });
+    $$('.chips [data-crowdmax]', panel).forEach(function (b) {
+      b.addEventListener('click', function () {
+        state.crowdMax = Number(b.dataset.crowdmax);
+        state.seed = (Date.now() & 0x7fffffff);
+        renderRecommend();
+      });
+    });
+    // 文本框在输入过程中只同步状态、不重建 DOM，避免丢焦点
+    var hpInput = $('#hotpool-input', panel);
+    if (hpInput) {
+      hpInput.addEventListener('input', function () {
+        state.hotPool = hpInput.value;
+        state.seed = (Date.now() & 0x7fffffff);
+      });
+    }
+    var luckInput = $('#luck-input', panel);
+    if (luckInput) {
+      luckInput.addEventListener('input', function () {
+        state.luck = luckInput.value;
+        state.seed = (Date.now() & 0x7fffffff);
+      });
+    }
     $$('.chips [data-msel]', panel).forEach(function (b) {
       b.addEventListener('click', function () {
         state.mainSel = Number(b.dataset.msel);
@@ -804,12 +1148,237 @@
       ' 个经结构筛选的候选组合中排序输出 · 随机种子 ' + rec.seed;
   }
 
+  /* ---------- 结果页：避拥挤出号 ---------- */
+
+  function crowdColor(v) {
+    if (v <= 30) return '#10b981';
+    if (v <= 45) return '#22c55e';
+    if (v <= 60) return '#f59e0b';
+    return '#ef4444';
+  }
+
+  function crowdMeter(label, value) {
+    return '<div class="ticket-bar"><span>' + label + '</span>' +
+      '<span class="progress"><i style="width:' + Math.min(value, 100).toFixed(0) +
+      '%;background:' + crowdColor(value) + '"></i></span>' +
+      '<span class="muted">' + value.toFixed(1) + ' / 100</span></div>';
+  }
+
+  function numPartBars(parts) {
+    return Object.keys(NUM_PART_META).map(function (k) {
+      var v = parts[k] || 0;
+      var w = Math.min(Math.abs(v) / 0.30, 1) * 100;
+      return '<div class="fbar-row"><span class="fbar-name">' + NUM_PART_META[k].name +
+        '</span><span class="fbar-track"><i style="background:' + NUM_PART_META[k].color +
+        ';width:' + w.toFixed(0) + '%;margin-left:0"></i></span>' +
+        '<span class="fbar-val">' + (v >= 0 ? '+' : '') + (v * 100).toFixed(0) + '</span></div>';
+    }).join('');
+  }
+
+  function bindToggles(box) {
+    $$('.link-btn', box).forEach(function (b) {
+      b.addEventListener('click', function () {
+        var d = $('#td-' + b.dataset.toggle, box);
+        if (!d) return;
+        var open = d.classList.toggle('open');
+        b.textContent = open ? (b.dataset.close || '收起来源依据 ▴')
+          : (b.dataset.open || '查看号码依据 ▾');
+      });
+    });
+    $$('.subtab', box).forEach(function (b) {
+      b.addEventListener('click', function () {
+        $$('.subtab', box).forEach(function (x) { x.classList.remove('active'); });
+        b.classList.add('active');
+        var m = $('#pool-main', box), s = $('#pool-special', box);
+        if (m) m.classList.toggle('hidden', b.dataset.sub !== 'main');
+        if (s) s.classList.toggle('hidden', b.dataset.sub !== 'special');
+      });
+    });
+  }
+
+  function crowdTicketHtml(t, i, c, rec) {
+    var f = t.features;
+    var partBars = Object.keys(CROWD_PART_META).map(function (k) {
+      var v = t.crowdParts[k] || 0;
+      return '<div class="fbar-row"><span class="fbar-name">' + CROWD_PART_META[k].name +
+        '</span><span class="fbar-track"><i style="background:' + CROWD_PART_META[k].color +
+        ';width:' + Math.min(v * 100, 100).toFixed(0) + '%;margin-left:0"></i></span>' +
+        '<span class="fbar-val">' + (v * 100).toFixed(0) + '</span></div>';
+    }).join('');
+
+    var checks = [
+      ['P0', '历史同源', t.checks.P0, '与上期重号 ' + t.repeat + ' 个（要求 < 3）'],
+      ['P1', '极端形态', t.checks.P1, '无 3 连号 / 全等差 / 对称 / 同尾≥3 / 全奇全偶 / 全大全小 / 挤同区'],
+      ['P2', '大众偏好', true, '以拥挤度量化，不作硬排除'],
+      ['P3', '拥挤黑名单', t.checks.P3, '热门号池命中 ' + t.checks.poolHits + ' 个（要求 < 5）'],
+      ['P4', '自我重复', true, '本次各注之间重号 ≤ ' + (rec.maxOverlap - 1) + ' 个'],
+      ['形态', '形态要求', t.checks.structure, '和值 / 跨度 / 奇偶 / 大小 / 区间 / 连号 全部达标']
+    ].map(function (x) {
+      return '<span class="check-chip ' + (x[2] ? 'ok' : 'bad') + '" title="' + esc(x[3]) + '">' +
+        (x[2] ? '✓' : '✗') + ' ' + x[0] + ' · ' + x[1] + '</span>';
+    }).join('');
+
+    var mainDetail = t.mainDetail.map(function (d) {
+      return '<div class="num-detail">' +
+        '<div class="num-detail-head"><i class="ball ball-main">' + pad2(d.num) + '</i>' +
+        '<span>拥挤度 ' + (d.crowd * 100).toFixed(0) + ' · 冷门排名第 ' + d.rank + '</span></div>' +
+        numPartBars(d.parts) + '</div>';
+    }).join('');
+    var specDetail = t.specialDetail.map(function (d) {
+      return '<div class="num-detail">' +
+        '<div class="num-detail-head"><i class="ball ball-special">' + pad2(d.num) + '</i>' +
+        '<span>拥挤度 ' + (d.crowd * 100).toFixed(0) + ' · 冷门排名第 ' + d.rank + '</span></div>' +
+        '</div>';
+    }).join('');
+
+    return '<div class="ticket">' +
+      '<div class="ticket-head">' +
+      '<span class="ticket-no">方案 ' + (i + 1) +
+      ' <em class="tier-tag tier-' + t.tier + '" title="' + esc(t.tierDesc) + '">' +
+      t.tierLabel + '</em></span>' +
+      '<span class="ticket-score">拥挤度 <b style="color:' + crowdColor(t.crowdScore) + '">' +
+      t.crowdScore.toFixed(1) + '</b></span>' +
+      '</div>' +
+      '<div class="ticket-balls">' + ballsHtml(t.main, 'main') +
+      '<span class="ball-sep">+</span>' + ballsHtml(t.special, 'special') + '</div>' +
+      '<div class="ticket-metrics">' +
+      '<span>和值 <b>' + f.sum + '</b></span>' +
+      '<span>跨度 <b>' + f.span + '</b></span>' +
+      '<span>奇偶 <b>' + f.odd + ':' + (c.mainCount - f.odd) + '</b></span>' +
+      '<span>大小 <b>' + f.big + ':' + (c.mainCount - f.big) + '</b></span>' +
+      '<span>区间 <b>' + f.zone + '</b></span>' +
+      '<span>连号组 <b>' + f.consecutive + '</b></span>' +
+      '<span>重号 <b>' + f.repeat + '</b></span>' +
+      '</div>' +
+      crowdMeter('拥挤度', t.crowdScore) +
+      '<p class="crowd-why">' + esc(t.explanation) + '</p>' +
+      '<button class="link-btn" data-toggle="' + i + '" data-open="查看筛选依据与号码拥挤度 ▾" ' +
+      'data-close="收起筛选依据 ▴">查看筛选依据与号码拥挤度 ▾</button>' +
+      '<div class="ticket-detail" id="td-' + i + '">' +
+      '<div class="check-list">' + checks + '</div>' +
+      '<div class="sub-title">拥挤度构成</div>' + partBars +
+      '<div class="sub-title">主区号码拥挤度</div>' + mainDetail +
+      '<div class="sub-title">' + c.specialLabel + '拥挤度</div>' + specDetail +
+      '</div>' +
+      '</div>';
+  }
+
+  function renderCrowdResult(box, rec) {
+    var c = rec.config;
+    var t = rec.plan;
+    var tierText = [];
+    if (t.full) tierText.push(t.full + ' 注全权重');
+    if (t.sqrt) tierText.push(t.sqrt + ' 注权重开方');
+    if (t.uniform) tierText.push(t.uniform + ' 注近乎均匀');
+
+    var ticketsHtml = rec.tickets.map(function (tk, i) {
+      return crowdTicketHtml(tk, i, c, rec);
+    }).join('') ||
+      '<p class="muted small">在当前筛选条件下未能生成号码，请放宽拥挤度上限或清空热门号池后重试。</p>';
+
+    function poolRow(o, cls) {
+      var v = o.crowd * 100;
+      return '<div class="pool-row">' +
+        '<i class="ball ' + cls + ' sm">' + pad2(o.num) + '</i>' +
+        '<span class="pool-score">' + v.toFixed(0) + '</span>' +
+        '<span class="crowd-track"><i style="width:' + Math.min(v, 100).toFixed(0) +
+        '%;background:' + crowdColor(v) + '"></i></span>' +
+        '</div>';
+    }
+
+    var poolRows = rec.poolCrowd.map(function (o) { return poolRow(o, 'ball-main'); }).join('');
+    var specRows = rec.specialCrowd.map(function (o) { return poolRow(o, 'ball-special'); }).join('');
+
+    var hotHtml = rec.hotPool.count
+      ? '<span class="balls">' + rec.hotPool.list.map(function (n) {
+        return '<i class="ball ball-hot sm">' + pad2(n) + '</i>';
+      }).join('') + '</span>'
+      : '<span class="muted small">未填写（可粘贴 AI / 主播荐号、群聊合买号或热搜数字）</span>';
+
+    var luckNums = Object.keys(rec.luck.main.map).map(function (k) {
+      return { num: Number(k), boost: rec.luck.main.map[k] };
+    }).sort(function (a, b) { return b.boost - a.boost; }).slice(0, 12);
+    var luckHtml = luckNums.length
+      ? luckNums.map(function (x) {
+        return '<span class="luck-item"><i class="ball ball-luck sm">' + pad2(x.num) +
+          '</i><b>+' + x.boost.toFixed(2) + '</b></span>';
+      }).join('')
+      : '<span class="muted small">未填写运气源</span>';
+
+    var sourcesHtml = rec.luck.main.sources.length
+      ? '<div class="source-list">' + rec.luck.main.sources.map(function (s) {
+        return '<div class="source-row"><span class="source-label">' + esc(s.label) + '</span>' +
+          '<span class="muted">' + esc(s.numbers) + ' · 衰减 ' + (s.decay * 100).toFixed(0) +
+          '%（' + s.ageDays + ' 天前）</span></div>';
+      }).join('') + '</div>'
+      : '';
+
+    var notesHtml = rec.notes.length
+      ? '<ul class="crowd-notes">' + rec.notes.map(function (n) {
+        return '<li>' + esc(n) + '</li>';
+      }).join('') + '</ul>'
+      : '';
+
+    var weightHtml = Object.keys(CROWD_PART_META).map(function (k) {
+      return '<span class="weight-item"><i style="background:' + CROWD_PART_META[k].color +
+        '"></i>' + CROWD_PART_META[k].name + ' <b>' +
+        ((LCrowd.CROWD_WEIGHTS[k] || 0) * 100).toFixed(0) + '%</b></span>';
+    }).join('');
+
+    box.innerHTML =
+      '<div class="card">' +
+      '<div class="card-head"><h3>避拥挤推荐方案</h3>' +
+      '<span class="badge">拥挤度上限 ' + rec.threshold + '</span></div>' +
+      '<p class="muted small">先按 P0–P4 逐层作废、再由【形态要求】筛掉越界组合，' +
+      '最后按避拥挤权重加权随机抽样出号：' + tierText.join(' · ') +
+      '。共抽样 ' + rec.attempts + ' 次，随机种子 ' + rec.seed +
+      '。拥挤度越低，说明这一注越"不像大多数人会买的号"。</p>' +
+      '<p class="hint">淘汰统计：P0/P1/P4 作废 ' + rec.rejected.hard + ' 次 · ' +
+      '形态要求越界 ' + rec.rejected.structure + ' 次 · 拥挤度超限 ' +
+      rec.rejected.crowd + ' 次 · 注间撞号重抽 ' + rec.rejected.overlap + ' 次。</p>' +
+      ticketsHtml +
+      '<div class="factor-legend">' + Object.keys(CROWD_PART_META).map(function (k) {
+        return '<div class="legend-row"><i style="background:' + CROWD_PART_META[k].color +
+          '"></i><b>' + CROWD_PART_META[k].name + '</b><span>' +
+          CROWD_PART_META[k].desc + '</span></div>';
+      }).join('') + '</div>' +
+      '</div>' +
+
+      '<div class="card">' +
+      '<div class="card-head"><h3>号码拥挤度排行</h3><span class="badge">越靠前越冷门</span></div>' +
+      '<p class="muted small">拥挤度 0–100：来自生日号偏好、谐音吉利尾、小号偏好、长期热度、上期开出，' +
+      '以及日历 / 事件环境项（调整幅度封顶 ±10%）。模型优先从低拥挤号码中抽样。</p>' +
+      '<div class="subtabs">' +
+      '<button class="subtab active" data-sub="main">' + c.mainLabel + '拥挤度</button>' +
+      '<button class="subtab" data-sub="special">' + c.specialLabel + '拥挤度</button>' +
+      '</div>' +
+      '<div class="pool-grid" id="pool-main">' + poolRows + '</div>' +
+      '<div class="pool-grid hidden" id="pool-special">' + specRows + '</div>' +
+      '</div>' +
+
+      '<div class="card">' +
+      '<div class="card-head"><h3>本期环境（E）与欧气（L）</h3></div>' +
+      '<div class="sub-title">热门号池 · 拥挤黑名单（P3）</div>' + hotHtml +
+      '<div class="sub-title">运气源命中的号码（加权值，封顶 +3.0）</div>' +
+      '<div class="luck-list">' + luckHtml + '</div>' +
+      sourcesHtml +
+      (notesHtml ? '<div class="sub-title">环境提示</div>' + notesHtml : '') +
+      '<div class="weight-list">' + weightHtml + '</div>' +
+      '<p class="hint">环境因子（E）判断"别人会买什么"，欧气因子（L）给号码加权，' +
+      '两者都只改变抽样概率，不改变中奖概率。奖池与派奖信息请以官方公告为准。</p>' +
+      '</div>';
+
+    bindToggles(box);
+  }
+
   function renderRecommendTickets(forceNewSeed) {
     var box = $('#rec-result');
     if (!box) return;
     var rec = buildRecommendation(forceNewSeed);
     var c = rec.config;
     var ticketsHtml;
+
+    if (rec.strategy === 'crowd') { renderCrowdResult(box, rec); return; }
 
     if (rec.bet && rec.bet.type !== 'single') {
       ticketsHtml = betCardHtml(rec);
