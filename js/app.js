@@ -2156,7 +2156,10 @@
     var d = res.latest && res.latest.date ? res.latest.date : '—';
     var tail = res.added ? '新增 ' + res.added + ' 期'
       : (res.fixed ? '修正 ' + res.fixed + ' 期' : '已是最新');
-    return '<b>' + name + '</b> ' + tail + '（数据至 ' + d + '）';
+    // 标出这条数据是从哪条链路来的，便于判断"是不是走了本地代理"
+    var via = res.via === 'proxy' ? '本地代理'
+      : (res.via === 'jsonp' ? 'JSONP' : (res.fromCache ? '会话缓存' : '官方接口'));
+    return '<b>' + name + '</b> ' + tail + '（数据至 ' + d + ' · ' + via + '）';
   }
 
   // kinds 省略 = 双色球 + 大乐透一起核对。首次加载要保证两个玩法都拿到：
@@ -2202,10 +2205,12 @@
       // 有玩法没拿到：提示常驻（不自动收起），点"重试"只重试失败的玩法
       var fileMode = window.LCLive.fileMode ||
         (typeof location !== 'undefined' && location.protocol === 'file:');
+      // 把底层原因摊开写（如"空响应（该接口要求 Referer）"），避免只看到"未取到"
+      var why = fails.map(function (r) { return r.error || '未知错误'; }).join('；');
       var hint = fileMode
-        ? '　当前以 file:// 直接打开：浏览器不发 Referer（双色球接口需要）、又会拦截跨域（大乐透接口需要），两个来源都取不到。请在项目目录执行 <code>python3 -m http.server 8000</code>，再访问 http://localhost:8000'
-        : '';
-      liveNote('开奖核对：' + text +
+        ? '　file:// 直接打开时浏览器不会发送 Referer，双色球接口会因此返回空响应。请在项目目录执行 <code>python3 scripts/serve.py</code>（本地服务 + 同源代理），再访问 http://localhost:8000'
+        : '　若浏览器未发送 Referer（隐私设置 / 扩展拦截），双色球接口同样会拒绝；可改用 <code>python3 scripts/serve.py</code> 打开页面。';
+      liveNote('开奖核对：' + text + '（' + why + '）' +
         ' <button type="button" id="live-retry" class="live-retry">重试</button>' + hint, 'fail');
       var btn = $('#live-retry');
       if (btn) btn.addEventListener('click', function () {

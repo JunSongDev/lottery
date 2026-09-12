@@ -3,16 +3,24 @@
  * 全局命名空间：window.LCLive
  * 依赖：LC（lotto-core.js）
  *
+ * 取数链路（按"最稳 → 最快"依次尝试）：
+ *   ① 同源代理 /api/<kind> —— 本地执行 python3 scripts/serve.py 时可用，
+ *      由服务端带 Referer 取官方数据，彻底不受浏览器 Referer / 跨域策略影响；
+ *   ② 直连官方接口 fetch —— http(s) 打开且浏览器确实发了 Referer 时可用；
+ *   ③ JSONP 兜底 —— 只有双色球接口支持 callback；但 file:// 下同样不发 Referer，
+ *      服务端会直接返回空 body，所以这种情况不再空等超时（见下方 FILE_MODE）。
+ *
+ * 实测（2026-09）：
+ *   · 双色球 jc.zhcw.com/port/client_json.php 必须带 Referer，且值不限
+ *     （不带时返回 200 + 0 字节 body 且没有 CORS 头，浏览器侧就是"请求失败"）；
+ *   · 大乐透 webapi.sporttery.cn 不校验 Referer，并返回 Access-Control-Allow-Origin: *。
+ *   Referer 是 forbidden header，JS 无法伪造；file:// 页面浏览器一律不发 Referer。
+ *   这就是"页面直连拿不到历史开奖数据"的根因，所以本文件优先走本地代理。
+ *
  * 设计：
  *   · 只用"最近 30 期"这一个窗口去补齐 / 校正页面里的数据
  *     （窗口与 scripts/fetch_data.py 的交叉校验口径一致），
  *     全量历史仍然以离线数据文件 data-*.js 为准，脚本随时可离线重跑；
- *   · 双色球走中彩网开奖接口（实测：请求必须带 Referer，否则返回空 body；
- *     支持 callback，所以 http 打开时走 fetch 或 JSONP 都能取数），
- *     大乐透走中国体育彩票官网接口（开放 CORS，仅 fetch 可用）；
- *   · 因此用 http://localhost 打开时两个来源都能拿到；用 file:// 直接打开时
- *     浏览器不发 Referer、又拦跨域，两个来源都拿不到 —— 这种情况直接提示
- *     "用本地服务打开"，不做无谓重试（见下方 FILE_MODE）；
  *   · 任何一个来源失败 = "这次没核对上"，页面继续用本地数据，功能不受影响；
  *   · 首次加载必须把两个玩法都拿到：单个玩法失败会自动重试（最多 MAX_TRIES 次），
  *     只有重试全部失败才算"这次没核对上"（网络抖动、偶发超时都能自愈）；
@@ -66,6 +74,7 @@
   var SOURCES = {
     ssq: {
       label: '中彩网',
+      proxy: '/api/ssq',    // 本地 serve.py 的同源代理（服务端带 Referer）
       url: function () {
         return 'https://jc.zhcw.com/port/client_json.php' +
           '?transactionType=10001001&lotteryId=1&issueCount=' + WINDOW_ROWS +
@@ -85,6 +94,7 @@
     },
     dlt: {
       label: '中国体育彩票官网',
+      proxy: '/api/dlt',    // 本地 serve.py 的同源代理
       url: function () {
         return 'https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry' +
           '?gameNo=85&provinceId=0&pageSize=' + WINDOW_ROWS + '&isVerify=1&pageNo=1';
@@ -133,20 +143,57 @@
         if (ctrl) ctrl.abort();
         reject(new Error('请求超时'));
       }, timeout);
+      function fail(err) { clearTimeout(timer); reject(err); }
       root.fetch(url, {
         credentials: 'omit',
         cache: 'no-store',
         signal: ctrl ? ctrl.signal : undefined
       }).then(function (res) {
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        return res.json();
-      }).then(function (json) {
+        return res.text();
+      }).then(function (txt) {
         clearTimeout(timer);
+        // 双色球接口缺少 Referer 时返回 200 + 空 body（也没有 CORS 头），
+        // 直接给出能自解释的原因，方便提示条告诉用户该怎么办
+        if (!txt) { reject(new Error('空响应（该接口要求 Referer）')); return; }
+        var json;
+        try { json = JSON.parse(txt); }
+        catch (e) { reject(new Error('响应不是合法 JSON')); return; }
         resolve(json);
-      }, function (err) {
+      }, fail);
+    });
+  }
+
+  // 同源代理（scripts/serve.py 提供）：服务端带 Referer 取数，
+  // 页面只跟自己人通信，不受浏览器 Referer / 跨域策略影响
+  function proxyRows(src) {
+    return new Promise(function (resolve, reject) {
+      if (!src.proxy) { reject(new Error('该来源没有本地代理')); return; }
+      if (!root.fetch) { reject(new Error('当前浏览器不支持 fetch')); return; }
+      var ctrl = root.AbortController ? new root.AbortController() : null;
+      var timer = setTimeout(function () {
+        if (ctrl) ctrl.abort();
+        reject(new Error('代理请求超时'));
+      }, TIMEOUT);
+      function fail(err) { clearTimeout(timer); reject(err); }
+      root.fetch(src.proxy, {
+        credentials: 'omit',
+        cache: 'no-store',
+        signal: ctrl ? ctrl.signal : undefined
+      }).then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);      // 没跑代理服务时就是 404
+        return res.text();
+      }).then(function (txt) {
         clearTimeout(timer);
-        reject(err);
-      });
+        var json;
+        try { json = JSON.parse(txt); }
+        catch (e) { reject(new Error('代理未返回 JSON')); return; }
+        if (!json || !json.ok || !json.rows) {
+          reject(new Error((json && json.error) || '代理未返回可用数据'));
+          return;
+        }
+        resolve({ rows: json.rows, via: 'proxy', label: json.src || '本地代理' });
+      }, fail);
     });
   }
 
@@ -167,24 +214,36 @@
     });
   }
 
-  // 先 fetch（更干净），失败再退回 JSONP（file:// / 部分隐私设置下只有它能用）
+  // 取数：同源代理 → 直连 fetch → JSONP 兜底
   function pull(src) {
-    return getJson(src.url(), TIMEOUT).then(null, function (err) {
-      if (!src.jsonp) throw err;
-      return jsonp(src.url(), TIMEOUT);
+    return proxyRows(src).then(null, function () {
+      return getJson(src.url(), TIMEOUT).then(function (json) {
+        return { json: json, via: 'direct' };
+      }, function (err) {
+        // file:// 下浏览器不发 Referer，JSONP（script 标签）同样拿不到数据，
+        // 没必要再空等一次 8 秒超时
+        if (!src.jsonp || FILE_MODE) throw err;
+        return jsonp(src.url(), TIMEOUT).then(function (json) {
+          return { json: json, via: 'jsonp' };
+        });
+      });
     });
   }
 
   // 取数 + 校验，失败自动重试：首次加载要尽量保证"两个玩法都拿到"
   function fetchRows(kind, src) {
     var tries = 0;
-    function next() {
+    function once() {
       tries++;
-      return pull(src).then(function (json) {
-        var rows = normalize(kind, src.parse(json));
+      return pull(src).then(function (out) {
+        // 代理返回的已是规范化行；直连 / JSONP 返回原始 JSON，交给各自的 parse
+        var rows = normalize(kind, out.rows || src.parse(out.json));
         if (!rows.length) throw new Error('接口未返回可用数据');
-        return { rows: rows, tries: tries };
-      }, function (err) {
+        return { rows: rows, tries: tries, via: out.via, label: out.label };
+      });
+    }
+    function next() {
+      return once().then(null, function (err) {
         if (tries >= tryLimit()) throw err;
         var wait = RETRY_DELAY[Math.min(tries - 1, RETRY_DELAY.length - 1)];
         return new Promise(function (resolve, reject) {
@@ -252,7 +311,7 @@
     if (hit) {
       var r0 = LC.patchDraws(kind, hit.rows);
       finish({
-        ok: true, kind: kind, label: src.label, fromCache: true, at: hit.at,
+        ok: true, kind: kind, label: src.label, fromCache: true, via: 'cache', at: hit.at,
         tries: 0, added: r0.added, fixed: r0.fixed, latest: latestOf(kind)
       });
       return;
@@ -262,12 +321,13 @@
       cacheSet(kind, { at: Date.now(), rows: out.rows });
       var r = LC.patchDraws(kind, out.rows);
       finish({
-        ok: true, kind: kind, label: src.label, fromCache: false, at: Date.now(),
+        ok: true, kind: kind, label: out.label || src.label, fromCache: false,
+        via: out.via, at: Date.now(),
         tries: out.tries, added: r.added, fixed: r.fixed, latest: latestOf(kind)
       });
     }, function (err) {
       finish({
-        ok: false, kind: kind, label: src.label, tries: tryLimit(),
+        ok: false, kind: kind, label: src.label, via: null, tries: tryLimit(),
         error: (err && err.message) || '未知错误', at: Date.now()
       });
     });

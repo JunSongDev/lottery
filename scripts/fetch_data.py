@@ -122,11 +122,11 @@ def fetch_full(kind, end):
     return rows
 
 
-def fetch_cwl_latest():
+def fetch_cwl_latest(tries=3, timeout=60):
     """中国福利彩票官网：最新双色球（用于交叉校验）"""
     url = ("https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice"
            "?name=ssq&issueCount=30&pageNo=1&pageSize=30&systemType=PC")
-    data = json.loads(decode(http_get(url, "https://www.cwl.gov.cn/")))
+    data = json.loads(decode(http_get(url, "https://www.cwl.gov.cn/", tries, timeout)))
     rows = []
     for item in data.get("result", []):
         rows.append({
@@ -138,11 +138,11 @@ def fetch_cwl_latest():
     return rows
 
 
-def fetch_sporttery_latest():
+def fetch_sporttery_latest(tries=3, timeout=60):
     """中国体育彩票官网：最新大乐透（用于交叉校验）"""
     url = ("https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry"
            "?gameNo=85&provinceId=0&pageSize=30&isVerify=1&pageNo=1")
-    data = json.loads(decode(http_get(url, "https://static.sporttery.cn/")))
+    data = json.loads(decode(http_get(url, "https://static.sporttery.cn/", tries, timeout)))
     rows = []
     for item in data["value"]["list"]:
         nums = [int(x) for x in item["lotteryDrawResult"].split()]
