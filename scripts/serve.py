@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
-import fetch_data as fd  # noqa: E402  （同目录，复用抓取与解析逻辑）
+import fetch_data as fd  # noqa: E402  （同目录，复用抓取与解析逻辑；已把 HERE 加入 sys.path）
 
 ROWS = 30                      # 核对窗口：最近 30 期（与 live.js 保持一致）
 API_TIMEOUT = 12               # 单次抓官方接口的超时（秒）
@@ -54,7 +54,16 @@ class Handler(SimpleHTTPRequestHandler):
         if path.startswith("/api/"):
             self.handle_api(path[len("/api/"):])
             return
+        # 忽略条件请求：否则刷新时会命中 304 拿回旧的 data-*.js
+        for h in ("If-Modified-Since", "If-None-Match"):
+            if h in self.headers:
+                del self.headers[h]
         super().do_GET()
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        super().end_headers()
 
     def handle_api(self, kind):
         item = SOURCES.get(kind)
@@ -80,21 +89,31 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, fmt, *args):
-        sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
+    def log_message(self, format, *args):                  # noqa: A002（与基类同名参数保持一致）
+        sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), format % args))
+
+
+def bind(port, tries=10):
+    """端口被占用时顺延，保证双击启动也能起来"""
+    for p in range(port, port + tries):
+        try:
+            return ThreadingHTTPServer(("127.0.0.1", p), Handler), p
+        except OSError:
+            continue
+    raise SystemExit("端口 %d~%d 都被占用，请换一个端口：python3 scripts/serve.py 8123"
+                     % (port, port + tries - 1))
 
 
 def main(argv):
-    port = 8000
+    start = 8000
     for arg in argv[1:]:
         if arg.isdigit():
-            port = int(arg)
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            start = int(arg)
+    server, port = bind(start)
     print("本地服务已启动：http://localhost:%d/index.html" % port)
     print("  · 静态目录：%s" % ROOT)
     print("  · 开奖核对走同源代理 /api/ssq、/api/dlt（服务端带 Referer），")

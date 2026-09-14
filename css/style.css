@@ -171,6 +171,7 @@ body.page-pushed .app { will-change: transform; }
 .live-note.syncing { color: var(--text-2); }
 .live-note.ok { color: #6ee7b7; }
 .live-note.fail { color: var(--text-3); }
+.live-note.warn { color: #fcd34d; }
 .live-note .dot {
   width: 6px; height: 6px; border-radius: 50%; flex: none;
   background: currentColor; opacity: .85;

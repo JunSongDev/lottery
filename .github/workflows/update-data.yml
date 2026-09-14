@@ -1,0 +1,52 @@
+name: 更新开奖数据
+
+# 作用：静态托管（OSS 等）没有服务端，无法在页面加载时代理取数时，
+#       用定时任务把最新开奖重新生成并传上去，页面打开就是最新数据。
+#
+# 开奖时间：双色球 21:15（周二/四/日）、大乐透 21:25（周一/三/六）。
+# GitHub Actions 用 UTC，故设为 13:45 / 14:45（即北京 21:45 / 22:45）各跑一次。
+on:
+  schedule:
+    - cron: '45 13 * * *'
+    - cron: '45 14 * * *'
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 抓取最新开奖数据
+        run: python3 scripts/fetch_data.py
+
+      # 需要提前在仓库 Settings → Secrets 里配好：
+      #   OSS_BUCKET、OSS_ENDPOINT（如 oss-cn-hangzhou.aliyuncs.com）、
+      #   OSS_ACCESS_KEY_ID、OSS_ACCESS_KEY_SECRET、OSS_PREFIX（可空）
+      # 没配就跳过上传，不影响抓取。
+      - name: 上传到阿里云 OSS
+        if: ${{ secrets.OSS_BUCKET != '' }}
+        env:
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          OSS_PREFIX: ${{ secrets.OSS_PREFIX }}
+        run: python3 scripts/upload_oss.py
+
+      # 顺带把更新后的数据文件提交回仓库（失败不影响上传结果）
+      - name: 提交更新
+        continue-on-error: true
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add data/ssq.json data/dlt.json js/data-ssq.js js/data-dlt.js
+          git diff --cached --quiet || git commit -m 'chore(data): 自动更新开奖数据'
+          git push

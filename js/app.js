@@ -2162,6 +2162,30 @@
     return '<b>' + name + '</b> ' + tail + '（数据至 ' + d + ' · ' + via + '）';
   }
 
+  // 补齐 / 修正数据后，刷新所有"依赖全量数据"的视图：
+  //   · 角标、最新开奖卡始终刷新；
+  //   · 停在一级页 → 重渲染当前面板；
+  //   · 停在历史开奖记录页 → 原地重算列表与计数（保留搜索词），
+  //     否则用户翻的正是这一页却看不到新数据；
+  //   · 推荐结果页保留用户已生成的结果，不动（下次重算自然用新数据）。
+  function refreshAfterPatch(kind) {
+    renderBadge();
+    renderHero();
+    if (kind !== state.kind) return;
+    var page = stack.length ? activePage() : null;
+    if (!page) { switchTab(state.tab); return; }
+    if (page !== 'draw-history') return;
+
+    var el = mounted['draw-history'];
+    var all = LC.draws(state.kind);
+    var span = el && el.querySelector('.page-nav-text span');
+    if (span && all.length) {
+      span.innerHTML = LC.cfg(state.kind).name + ' · 共 ' + all.length + ' 期 · ' +
+        all[0].d + ' ~ ' + all[all.length - 1].d;
+    }
+    renderHistList(true);
+  }
+
   // kinds 省略 = 双色球 + 大乐透一起核对。首次加载要保证两个玩法都拿到：
   //   · 谁先拿到就先把它用起来，不必等另一个（某个来源卡住也不会拖住整页）；
   //   · 都拿到 → 提示条数秒后自动收起；
@@ -2182,11 +2206,11 @@
 
     function onOne(res) {
       results.push(res);
-      renderBadge();
       if (res.ok && (res.added || res.fixed)) {
         state.cache = {};                  // 统计 / 推荐 / 回测都依赖全量数据，必须失效
-        renderHero();
-        if (!stack.length) switchTab(state.tab);
+        refreshAfterPatch(res.kind);
+      } else {
+        renderBadge();
       }
 
       if (results.length < list.length) {
@@ -2202,14 +2226,60 @@
         return;
       }
 
+      // 虽没核对上，但本地数据已经覆盖到最近一期开奖（静态托管常见：
+      // 数据文件是发布/定时更新时最新的，只是页面联不上代理）→ 不必打扰用户
+      var fresh = fails.every(function (r) {
+        var need = window.LCLive.lastDrawDate ? window.LCLive.lastDrawDate(r.kind) : '';
+        var d = LC.draws(r.kind).slice(-1)[0];
+        return !need || !d || String(d.d || '') >= need;
+      });
+      if (fresh) {
+        var stamps = fails.map(function (r) {
+          var d = LC.draws(r.kind).slice(-1)[0];
+          return '<b>' + LC.cfg(r.kind).name + '</b> 数据至 ' + (d ? d.d : '—');
+        }).join(' · ');
+        liveNote('本次没能联网核对（' + why + '），但数据已覆盖最近一期开奖：' + stamps +
+          '，可正常使用。若希望每次打开都实时核对，请配置远端代理' +
+          '（见 index.html 里的 <code>window.LIVE_PROXY</code>）。', 'warn', 15000);
+        return;
+      }
+
       // 有玩法没拿到：提示常驻（不自动收起），点"重试"只重试失败的玩法
       var fileMode = window.LCLive.fileMode ||
         (typeof location !== 'undefined' && location.protocol === 'file:');
-      // 把底层原因摊开写（如"空响应（该接口要求 Referer）"），避免只看到"未取到"
-      var why = fails.map(function (r) { return r.error || '未知错误'; }).join('；');
-      var hint = fileMode
-        ? '　file:// 直接打开时浏览器不会发送 Referer，双色球接口会因此返回空响应。请在项目目录执行 <code>python3 scripts/serve.py</code>（本地服务 + 同源代理），再访问 http://localhost:8000'
-        : '　若浏览器未发送 Referer（隐私设置 / 扩展拦截），双色球接口同样会拒绝；可改用 <code>python3 scripts/serve.py</code> 打开页面。';
+      // 把底层原因摊开写（如"页面服务器没有 /api 代理（HTTP 404）"），避免只看到"未取到"
+      var why = fails.map(function (r) {
+        return (r.error || '未知错误') + (r.proxyError ? '（' + r.proxyError + '）' : '');
+      }).join('；');
+      // 按失败性质给不同指引：没有代理 / file:// / 跨域被拦，处理办法并不一样
+      var noProxy = fails.some(function (r) { return r.errorKind === 'no-proxy'; });
+      var host = (typeof location !== 'undefined' && location.hostname) || '';
+      var isLocal = !host || /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)$/.test(host);
+      var remote = window.LCLive.remoteBase ? (window.LCLive.remoteBase() || '') : '';
+      var remoteText = remote ? '（已配为 <code>' + esc(remote) + '</code>，请确认它可访问）' : '';
+      // 本地开发：起本地服务即可；静态托管（OSS / COS / Pages / CDN）：
+      // 服务器不会提供 /api，得靠远端代理（云函数）或定时重新生成数据文件
+      var howTo = isLocal
+        ? '请在项目目录运行 <code>python3 scripts/serve.py</code>' +
+          '（或双击 <code>启动本地服务.command</code>），再访问 ' +
+          '<a href="http://localhost:8000/index.html" target="_blank" rel="noopener">' +
+          'http://localhost:8000</a>'
+        : '当前是静态托管站点，服务器不会提供 <code>/api</code> 代理：请把 ' +
+          '<code>scripts/proxy_wsgi.py</code> 部署成云函数（阿里云函数计算 FC 即可），' +
+          '再在 index.html 里写 <code>window.LIVE_PROXY = \'https://你的函数域名\'</code>' +
+          remoteText + '；或改用 <code>.github/workflows/update-data.yml</code> ' +
+          '定时重新生成并上传数据文件（无需代理也能保持数据最新）。';
+      var hint;
+      if (noProxy) {
+        hint = '　' + (isLocal ? '当前页面不是由本地服务提供的：' : '当前站点没有可用的开奖代理：') +
+          '服务器没有 <code>/api</code>' + (remote ? '、远端代理也取不到数据' : '') +
+          '，浏览器又无法跨域直连官方接口。' + howTo;
+      } else if (fileMode) {
+        hint = '　file:// 直接打开时浏览器不会发送 Referer，官方接口会拒绝取数。' + howTo;
+      } else {
+        hint = '　浏览器没能拿到官方接口的响应（跨域 / Referer 被拦）。可改用本地服务：' +
+          howTo;
+      }
       liveNote('开奖核对：' + text + '（' + why + '）' +
         ' <button type="button" id="live-retry" class="live-retry">重试</button>' + hint, 'fail');
       var btn = $('#live-retry');

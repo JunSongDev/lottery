@@ -64,6 +64,13 @@
 <script src="js/tests.js"></script>
 <script src="js/model.js"></script>
 <script src="js/crowd.js"></script>
+<!-- 静态托管（阿里云 OSS / COS / Pages / CDN）—— 页面加载时去云函数代理核对最新开奖，
+     所以"只打开页面"就会自动更新，不必再本地起服务。
+     代理代码见 scripts/proxy_wsgi.py（粘成云函数的 app.py，HTTP 触发器选「无需认证」）。
+     自检：浏览器直接访问 https://<域名>/ 应返回 {"ok":true,...}。
+     修改本文件后，记得在 OSS / CDN 上刷新 index.html 的缓存。
+     临时换代理可以不改文件，直接在网址后加参数：index.html?proxy=https%3A%2F%2F<域名> -->
+<script>window.LIVE_PROXY = 'https://lottery-proxy-utlmmbaooz.cn-shanghai.fcapp.run';</script>
 <script src="js/live.js"></script>
 <script src="js/charts.js"></script>
 <script src="js/app.js"></script>
