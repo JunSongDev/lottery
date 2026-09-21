@@ -842,25 +842,34 @@
       }
     });
 
-    // 特别号：按拥挤度从低到高轮转分配（避免与已用重复）
-    var specOrder = sc.list.map(function (o) { return o.num; });
+    // 特别号：与主区同口径的避拥挤权重 w = e^(-γ·拥挤度) × (1 + 运气源)，
+    //   逐注做加权无放回抽样。注数不超过特别号池时强制"注间不重复"，
+    //   超过池大小时才允许重复。随机数取自同一个 rnd(seed)，
+    //   因此"换一批"会同时改变主区与特别区（此前特别区是确定性轮转，永远不变）。
+    var specWeights = sc.list.map(function (o) {
+      return Math.exp(-gamma * o.crowd) * (1 + (luckSpec.map[o.num] || 0));
+    });
+    var specPoolSize = sc.list.length;
+    var specNoRepeat = tickets.length <= specPoolSize;
     var used = {};
-    tickets.forEach(function (t, i) {
-      var spec = [];
-      for (var k = 0; k < c.specialCount; k++) {
-        for (var s = 0; s < specOrder.length; s++) {
-          var idx = (i * c.specialCount + k + s) % specOrder.length;
-          var n = specOrder[idx];
-          if (spec.indexOf(n) < 0 && (!used[n] || tickets.length > specOrder.length)) {
-            spec.push(n); break;
-          }
+    tickets.forEach(function (t) {
+      var w = specWeights.slice();
+      if (specNoRepeat) {
+        for (var s = 0; s < specPoolSize; s++) {
+          if (used[sc.list[s].num]) w[s] = 0;
         }
       }
-      while (spec.length < c.specialCount) {
-        var n2 = specOrder[(i + spec.length) % specOrder.length];
-        if (spec.indexOf(n2) < 0) spec.push(n2); else break;
+      var idxs = weightedSample(w, c.specialCount, rnd);
+      // 兜底：池子不够分（注数 × 特别号个数 > 池大小）时按权重降序补足
+      if (idxs.length < c.specialCount) {
+        var specFallbackOrder = specWeights.slice().map(function (v, si) { return si; })
+          .sort(function (a, b) { return specWeights[b] - specWeights[a]; });
+        for (var oi = 0; oi < specFallbackOrder.length && idxs.length < c.specialCount; oi++) {
+          if (idxs.indexOf(specFallbackOrder[oi]) < 0) idxs.push(specFallbackOrder[oi]);
+        }
       }
-      t.special = spec.sort(function (a, b) { return a - b; });
+      var spec = idxs.map(function (si) { return sc.list[si].num; });
+      t.special = spec.slice().sort(ascNum);
       spec.forEach(function (n) { used[n] = 1; });
       t.mainDetail = t.main.map(function (n) {
         var o = nc.list.filter(function (x) { return x.num === n; })[0];
@@ -1219,11 +1228,17 @@
     var finEval = ev.evaluate(finalSel, true);
     var stats = poolStats(finEval.rows, threshold);
 
-    // 特别区：每个号在各注中出现次数相同，取最冷的若干个即为最优解
+    // 特别区：每个号在各注中出现次数相同，只需挑"低拥挤"的一批；
+    //   但固定取最冷 N 个会让每次生成结果一模一样 —— 改为同口径（避拥挤权重）
+    //   加权无放回抽样：依旧偏向冷号，同时"换一批"会随 seed 变化。
     var specialCount = (!form || form === 'main') ? specialSel : (sDanCount + sTuoCount);
-    var specialNums = sc.list.slice(0, specialCount).map(function (o) { return o.num; }).sort(ascNum);
-    var sDan = sDanCount ? specialNums.slice(0, sDanCount).sort(ascNum) : [];
-    var sTuo = sDanCount ? specialNums.slice(sDanCount).sort(ascNum) : [];
+    var specialNums = samplePool(sc, luckSpec.map, gamma, specialCount, rnd);
+    // 胆拖的特别区胆码：在抽出的池里挑拥挤度最低的（官方固定 1 个）
+    var specCrowdOf = {};
+    sc.list.forEach(function (o) { specCrowdOf[o.num] = o.crowd; });
+    var specByCrowd = specialNums.slice().sort(function (a, b) { return specCrowdOf[a] - specCrowdOf[b]; });
+    var sDan = sDanCount ? specByCrowd.slice(0, sDanCount).sort(ascNum) : [];
+    var sTuo = sDanCount ? specialNums.filter(function (n) { return sDan.indexOf(n) < 0; }).sort(ascNum) : [];
 
     // 注数：与 app 的 betPreview 口径一致
     var mainCombos, specCombos;
