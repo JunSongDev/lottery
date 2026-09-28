@@ -283,6 +283,24 @@ body.page-pushed .app { will-change: transform; }
   background: linear-gradient(180deg, #ff7a6b, #6366f1);
 }
 
+/* 卡片标题右侧的操作区（徽标 + 复制按钮），不参与挤压 */
+.card-head .head-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+
+.copy-btn {
+  appearance: none; cursor: pointer; font-family: inherit;
+  font-size: 11.5px; font-weight: 600; color: #c7d2fe;
+  padding: 5px 11px; border-radius: 999px; white-space: nowrap;
+  background: rgba(99, 102, 241, .16);
+  border: 1px solid rgba(129, 140, 248, .28);
+  transition: all .18s ease;
+}
+.copy-btn:active { transform: scale(.96); }
+.copy-btn.done {
+  color: #86efac;
+  background: rgba(34, 197, 94, .16);
+  border-color: rgba(134, 239, 172, .4);
+}
+
 .muted { color: var(--text-3); }
 .small { font-size: 11.5px; }
 .hint { font-size: 11.5px; color: var(--text-3); line-height: 1.75; margin-top: 10px; }

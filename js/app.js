@@ -1531,7 +1531,8 @@
     box.innerHTML =
       '<div class="card">' +
       '<div class="card-head"><h3>避拥挤号码池方案</h3>' +
-      '<span class="badge">拥挤度上限 ' + rec.threshold + '</span></div>' +
+      '<span class="head-actions"><span class="badge">拥挤度上限 ' + rec.threshold + '</span>' +
+      copyBtnHtml(rec) + '</span></div>' +
       '<p class="muted small">复式 / 胆拖买的是"一批号码"：这张票展开成 ' + e.count +
       ' 注（主区），每注拥挤度各不相同，票面没有单一拥挤度、也没法把其中某几注剔除。' +
       '所以改优化<b>号码池</b>——把池子展开后的全部组合一起评价，' +
@@ -1572,6 +1573,111 @@
       crowdEnvCard(rec);
 
     bindToggles(box);
+    bindCopyButton(box, rec);
+  }
+
+  /* ---------- 复制推荐号码 ----------
+   * 三种投注方式的票面结构不同，复制时按各自的行文给出：
+   *   单式   每注一行            01 05 12 23 28 31 + 07
+   *   复式   一行（号码池）      01 05 12 23 28 31 33 + 07 09
+   *   胆拖   逐区标注胆码 / 拖码（区名随玩法：大乐透前区/后区，双色球红球/蓝球）
+   *          双区胆拖           前区胆：10 35
+   *                            前区拖：13 17 21 24 33
+   *                            后区胆：11
+   *                            后区拖：03 05 07
+   *          未设胆拖的那一区只标区名，例如主区胆拖时：  蓝球：03 14
+   */
+  function numsText(nums) {
+    return (nums || []).map(pad2).join(' ');
+  }
+
+  function betNumbersText(rec) {
+    if (rec.mode === 'pool') {
+      var form = rec.dtForm;
+      if (rec.betType === 'dantuo') {
+        var ml = rec.config.mainLabel, sl = rec.config.specialLabel;
+        var lines = [];
+        if (form !== 'special') {
+          lines.push(ml + '胆：' + numsText(rec.dan));
+          lines.push(ml + '拖：' + numsText(rec.tuo));
+        } else {
+          lines.push(ml + '：' + numsText(rec.pool.main));
+        }
+        if (form !== 'main') {
+          lines.push(sl + '胆：' + numsText(rec.sDan));
+          lines.push(sl + '拖：' + numsText(rec.sTuo));
+        } else {
+          lines.push(sl + '：' + numsText(rec.pool.special));
+        }
+        return lines.join('\n');
+      }
+      return numsText(rec.pool.main) + ' + ' + numsText(rec.pool.special);
+    }
+    return rec.tickets.map(function (t) {
+      return numsText(t.main) + ' + ' + numsText(t.special);
+    }).join('\n');
+  }
+
+  // 剪贴板：优先 navigator.clipboard（需 https / localhost），失败回落 execCommand
+  function legacyCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', 'readonly');
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { ta.setSelectionRange(0, text.length); } catch (e) { /* 忽略 */ }
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  function copyText(text, cb) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        navigator.clipboard.writeText(text).then(function () { cb(true); },
+          function () { cb(legacyCopy(text)); });
+        return;
+      } catch (e) { /* 继续走回落 */ }
+    }
+    cb(legacyCopy(text));
+  }
+
+  function copyBtnHtml(rec) {
+    var tip;
+    if (rec.mode === 'pool') {
+      tip = rec.betType === 'dantuo'
+        ? '复制为胆拖格式：' + rec.config.mainLabel + '胆 / ' + rec.config.mainLabel +
+          '拖、' + rec.config.specialLabel + '胆 / ' + rec.config.specialLabel +
+          '拖 逐行标注'
+        : '复制为复式格式：' + rec.config.mainLabel + '号码池 + ' +
+          rec.config.specialLabel + '号码池（一行）';
+    } else {
+      tip = '复制为单式格式：每注一行，' + rec.config.mainLabel + ' + ' + rec.config.specialLabel;
+    }
+    return '<button class="copy-btn" id="btn-copy-nums" type="button" title="' +
+      esc(tip) + '">复制号码</button>';
+  }
+
+  function bindCopyButton(box, rec) {
+    var btn = $('#btn-copy-nums', box);
+    if (!btn) return;
+    var label = btn.textContent;
+    var timer = null;
+    btn.addEventListener('click', function () {
+      copyText(betNumbersText(rec), function (ok) {
+        if (timer) clearTimeout(timer);
+        btn.textContent = ok ? '已复制 ✓' : '复制失败';
+        btn.classList.toggle('done', ok);
+        timer = setTimeout(function () {
+          btn.textContent = label;
+          btn.classList.remove('done');
+        }, 1600);
+      });
+    });
   }
 
   function renderCrowdResult(box, rec) {
@@ -1587,7 +1693,8 @@
     box.innerHTML =
       '<div class="card">' +
       '<div class="card-head"><h3>避拥挤推荐方案</h3>' +
-      '<span class="badge">拥挤度上限 ' + rec.threshold + '</span></div>' +
+      '<span class="head-actions"><span class="badge">拥挤度上限 ' + rec.threshold + '</span>' +
+      (rec.tickets.length ? copyBtnHtml(rec) : '') + '</span></div>' +
       '<p class="muted small">先按 P0–P4 逐层作废、再由【形态要求】筛掉越界组合，' +
       '最后按避拥挤权重加权随机抽样出号：' + tierText +
       '。共抽样 ' + rec.attempts + ' 次，随机种子 ' + rec.seed +
@@ -1604,6 +1711,7 @@
       crowdEnvCard(rec);
 
     bindToggles(box);
+    bindCopyButton(box, rec);
   }
 
   function renderRecommendTickets(forceNewSeed) {
