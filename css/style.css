@@ -920,3 +920,112 @@ body.page-dragging .page-view { transition: none; }
 .hist-more { padding: 2px 0 12px; }
 #hist-summary .hint { margin-top: 0; margin-bottom: 10px; }
 #hist-summary b { color: #dbe4ff; }
+
+/* ---------------- 推荐记录与中奖核对 ---------------- */
+
+/* 号码球命中态：只有开奖后才会加，未开奖不做任何标记 */
+.ball.hit {
+  box-shadow: 0 0 0 2.5px rgba(250, 204, 21, .95), 0 0 16px -2px rgba(250, 204, 21, .7);
+}
+.ball.miss { opacity: .34; filter: grayscale(.6); }
+
+/* 记录列表 */
+.rec-item {
+  padding: 12px 13px; border-radius: 14px; margin-bottom: 10px;
+  background: var(--card); border: 1px solid var(--line);
+  cursor: pointer; transition: background .18s ease, border-color .18s ease;
+}
+.rec-item:active { background: var(--card-2); }
+.rec-item-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.rec-title { font-size: 13px; font-weight: 700; color: #dbe4ff; }
+.rec-status {
+  flex: none; font-size: 10.5px; font-weight: 700;
+  padding: 3px 9px; border-radius: 999px;
+}
+.rec-status.wait { color: var(--text-2); background: rgba(255, 255, 255, .06); border: 1px solid var(--line); }
+.rec-status.done { color: #6ee7b7; background: rgba(16, 185, 129, .14); border: 1px solid rgba(110, 231, 183, .32); }
+.rec-meta {
+  margin-top: 6px; font-size: 11.5px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.rec-nums {
+  margin: 9px 0 0; padding: 9px 10px; border-radius: 10px;
+  background: rgba(255, 255, 255, .04); border: 1px solid var(--line);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.85; color: var(--text-2);
+  white-space: pre-wrap; word-break: break-all;
+}
+.rec-item-actions { display: flex; align-items: center; gap: 14px; margin-top: 10px; }
+.rec-item-actions .copy-btn { flex: none; }
+.link-btn.danger, .btn-ghost.danger { color: #fca5a5; }
+
+/* 核对页 */
+.chk-banner {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 16px 16px 15px; border-radius: 16px; margin-bottom: 12px;
+  border: 1px solid var(--line);
+}
+.chk-banner b { font-size: 22px; font-weight: 800; letter-spacing: -.5px; }
+.chk-banner span { font-size: 11.5px; color: var(--text-2); line-height: 1.6; }
+.chk-banner.win {
+  background: linear-gradient(135deg, rgba(249, 115, 22, .22), rgba(139, 92, 246, .18));
+  border-color: rgba(251, 146, 60, .42);
+}
+.chk-banner.win b { color: #ffd9a8; }
+.chk-banner.miss { background: rgba(255, 255, 255, .05); }
+.chk-banner.miss b { color: var(--text-2); }
+.chk-banner.wait { background: rgba(99, 102, 241, .12); border-color: rgba(129, 140, 248, .3); }
+.chk-banner.wait b { color: #c7d2fe; font-size: 16px; }
+
+.chk-info { display: grid; gap: 8px; }
+.chk-info-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  font-size: 12px;
+}
+.chk-info-row span { color: var(--text-3); flex: none; }
+.chk-info-row b { color: #dbe4ff; font-weight: 700; text-align: right; }
+
+.chk-draw { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.chk-lines { display: grid; gap: 10px; }
+.chk-line {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 9px 10px; border-radius: 12px;
+  background: rgba(255, 255, 255, .04); border: 1px solid var(--line);
+}
+.chk-line-no { flex: none; font-size: 11px; color: var(--text-3); margin-right: 2px; }
+.chk-line-tag {
+  flex: none; margin-left: auto;
+  font-size: 10.5px; font-weight: 700; color: var(--text-3);
+  padding: 3px 9px; border-radius: 999px;
+  background: rgba(255, 255, 255, .05); border: 1px solid var(--line);
+}
+.chk-line-tag.win { color: #ffd9a8; background: rgba(249, 115, 22, .18); border-color: rgba(251, 146, 60, .4); }
+
+.chk-level {
+  display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px;
+  padding: 10px 0; border-bottom: 1px dashed rgba(255, 255, 255, .07);
+}
+.chk-level-name { font-size: 12.5px; font-weight: 700; color: #dbe4ff; }
+.chk-level-name i {
+  display: block; font-style: normal; font-size: 10.5px;
+  font-weight: 500; color: var(--text-3); margin-top: 2px;
+}
+.chk-level-count { font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.chk-level-sum {
+  font-size: 13px; font-weight: 700; color: #ffd9a8;
+  font-variant-numeric: tabular-nums; min-width: 62px; text-align: right;
+}
+.chk-total {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);
+  font-size: 12px; color: var(--text-2);
+}
+.chk-total b { font-size: 18px; font-weight: 800; color: #ffd9a8; }
+.chk-float {
+  margin-top: 10px; padding: 9px 11px; border-radius: 10px;
+  font-size: 11.5px; line-height: 1.7; color: var(--text-2);
+  background: rgba(99, 102, 241, .12); border: 1px solid rgba(129, 140, 248, .28);
+}
+.chk-float b { color: #c7d2fe; }

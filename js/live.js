@@ -430,6 +430,28 @@
     return '';
   }
 
+  // 该玩法"下一个开奖日"（YYYY-MM-DD）：推荐记录用它推算这一注对的是哪一期。
+  // 今天正好是开奖日且还没到开奖时间 → 就是今天；否则向后找最近的开奖日。
+  function nextDrawDate(kind, now) {
+    var days = DRAW_DAYS[kind];
+    if (!days) return '';
+    var base = now || new Date();
+    var t = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+    for (var i = 0; i < 8; i++) {
+      if (days.indexOf(t.getDay()) >= 0) {
+        if (i === 0) {
+          var ready = new Date(t.getFullYear(), t.getMonth(), t.getDate(),
+            DRAW_READY_HOUR, DRAW_READY_MIN);
+          // 今天已经开过了 → 这一注只能对下一期
+          if (base >= ready) { t.setDate(t.getDate() + 1); continue; }
+        }
+        return ymd(t);
+      }
+      t.setDate(t.getDate() + 1);
+    }
+    return '';
+  }
+
   var last = {};      // 每个玩法最近一次核对结果，供界面展示
 
   function latestOf(kind) {
@@ -499,6 +521,7 @@
     sources: SOURCES,
     remoteBase: remoteBase,      // 当前生效的远端代理基址（静态托管用），未配置时为空串
     lastDrawDate: lastDrawDate,  // 该玩法最近一个"应该已开奖"的日期 YYYY-MM-DD
+    nextDrawDate: nextDrawDate,  // 该玩法"下一个开奖日" YYYY-MM-DD（推荐记录用它推算目标期）
     WINDOW_ROWS: WINDOW_ROWS,
     MAX_TRIES: MAX_TRIES,
     fileMode: FILE_MODE

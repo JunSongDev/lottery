@@ -715,6 +715,7 @@
         // 前进：按历史记录里的页面名恢复对应的二级页
         historyPushed = true;
         if (st.lottoPage === 'draw-history') showHistoryPage({ noHistory: true });
+        else if (st.lottoPage === 'rec-list') showRecordsPage({ noHistory: true });
         else showResultPage(null, { noHistory: true });
       }
     });
@@ -782,6 +783,439 @@
       recTimer = null;
       renderRecommendTickets(forceNewSeed);
     }, 20);
+  }
+
+  /* ============================================================
+   * 推荐记录 —— 生成后自动留档，开奖后回来核对
+   *   一次推荐 = 一条记录：一次出 5 注也只是一条，5 注存在同一条的 bet.tickets 里
+   *   存储见 js/records.js（localStorage），对奖规则见 js/prize.js
+   * ========================================================== */
+
+  function ymdOf(d) {
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
+
+  function recCount() { return window.LR ? window.LR.count() : 0; }
+
+  function recBetTitle(it) {
+    if (!it || !it.bet) return '推荐';
+    if (it.bet.type === 'single') return '单式 ' + it.bet.tickets.length + ' 注';
+    if (it.bet.type === 'dantuo') {
+      var f = it.bet.dtForm || it.dtForm;
+      return ((window.LM && LM.dtFormLabel && f) ? LM.dtFormLabel(it.kind, f) : '胆拖') + '投注';
+    }
+    return '复式投注';
+  }
+
+  // 生成器返回的结构统一成记录里的 bet（胆拖时 main/special 记的是"胆 + 拖"的完整池）
+  function betOfRec(rec) {
+    if (!rec) return null;
+    function cp(a) { return (a || []).slice(); }
+    if (rec.mode === 'pool') {
+      if (rec.betType === 'dantuo') {
+        return {
+          type: 'dantuo', dtForm: rec.dtForm || '',
+          main: cp(rec.pool.main), special: cp(rec.pool.special),
+          dan: cp(rec.dan), tuo: cp(rec.tuo), sDan: cp(rec.sDan), sTuo: cp(rec.sTuo),
+          tickets: []
+        };
+      }
+      return { type: 'compound', main: cp(rec.pool.main), special: cp(rec.pool.special), tickets: [] };
+    }
+    var b = rec.bet;
+    if (b && b.type === 'dantuo') {
+      return {
+        type: 'dantuo', dtForm: b.dtForm || rec.dtForm || '',
+        main: (b.dan || []).concat(b.tuo || []).sort(function (x, y) { return x - y; }),
+        special: (b.sDan || []).concat(b.sTuo || []).sort(function (x, y) { return x - y; }),
+        dan: cp(b.dan), tuo: cp(b.tuo), sDan: cp(b.sDan), sTuo: cp(b.sTuo), tickets: []
+      };
+    }
+    if (b && b.type === 'compound') {
+      return { type: 'compound', main: cp(b.main), special: cp(b.special), tickets: [] };
+    }
+    var tks = rec.tickets || (b && b.tickets) || [];
+    return {
+      type: 'single', tickets: tks.map(function (t) {
+        return { main: cp(t.main), special: cp(t.special) };
+      })
+    };
+  }
+
+  function saveRecommendRecord(rec) {
+    if (!window.LR || !rec) return null;
+    var c = rec.config;
+    var kind = rec.kind || state.kind;
+    var bet = betOfRec(rec);
+    if (!bet) return null;
+
+    // 注数与金额：复式 / 胆拖是一张票（展开 N 注），单式是 N 注
+    var combos = 0, yuan = 2;
+    if (rec.mode === 'pool' && rec.bet) {
+      combos = rec.bet.combos || 0;
+      yuan = rec.bet.yuanPerBet || 2;
+    } else if (rec.bet && rec.bet.combos) {
+      combos = rec.bet.combos;
+      yuan = rec.bet.yuanPerBet || 2;
+    } else {
+      combos = (rec.tickets || []).length;
+    }
+    if (!combos) return null;      // 没生成出号码时不记账
+
+    var now = new Date();
+    var item = window.LR.add({
+      kind: kind,
+      kindName: c.name,
+      betType: rec.betType || bet.type,
+      dtForm: rec.dtForm || bet.dtForm || '',
+      bet: bet,
+      recDate: ymdOf(now),
+      // 目标期：按官方开奖日推算的"下一期"
+      target: (window.LCLive && window.LCLive.nextDrawDate) ? window.LCLive.nextDrawDate(kind) : '',
+      combos: combos,
+      cost: combos * yuan,
+      text: betNumbersText(rec),
+      at: now.getTime()
+    });
+    syncRecEntry();
+    return item;
+  }
+
+  function syncRecEntry() {
+    var btn = $('#btn-rec-list');
+    if (btn) btn.textContent = '推荐记录（' + recCount() + '）';
+  }
+
+  /* ---------- 二级页：推荐记录列表 ---------- */
+
+  function recordsListHtml() {
+    var items = window.LR.list();
+    if (!items.length) {
+      return '<div class="card"><p class="muted small">还没有推荐记录。' +
+        '生成一次推荐号码就会自动留档，等目标期开奖后回到这里核对。</p></div>';
+    }
+    return items.map(function (it) {
+      var draw = window.LP.findDraw(it.kind, it.target);
+      return '<div class="rec-item" data-id="' + it.id + '">' +
+        '<div class="rec-item-head">' +
+        '<span class="rec-title">' + esc(it.kindName) + ' · ' + recBetTitle(it) + '</span>' +
+        '<span class="rec-status ' + (draw ? 'done' : 'wait') + '">' +
+        (draw ? '已开奖' : '待开奖') + '</span>' +
+        '</div>' +
+        '<div class="rec-meta">推荐 ' + esc(it.recDate) + ' · 目标开奖 ' +
+        esc(it.target || '—') + ' · ' + it.combos.toLocaleString() + ' 注 · ' +
+        it.cost.toLocaleString() + ' 元</div>' +
+        '<pre class="rec-nums">' + esc(it.text) + '</pre>' +
+        '<div class="rec-item-actions">' +
+        '<button class="copy-btn" data-copy="' + it.id + '">复制号码</button>' +
+        '<button class="link-btn" data-check="' + it.id + '">核对中奖 ›</button>' +
+        '<button class="link-btn danger" data-del="' + it.id + '">删除</button>' +
+        '</div>' +
+        '</div>';
+    }).join('');
+  }
+
+  function recordsPageHtml() {
+    var n = recCount();
+    return '<header class="page-nav">' +
+      '<button class="back-btn" id="btn-back" aria-label="返回">‹</button>' +
+      '<div class="page-nav-text"><b>推荐记录</b>' +
+      '<span id="rec-count-note">共 ' + n + ' 条 · 最多 ' +
+      (window.LR ? window.LR.MAX : 200) + ' 条</span></div>' +
+      '</header>' +
+      '<div class="page-actions"><div class="gen-actions' + (n ? ' two' : '') + '">' +
+      '<button class="btn-ghost" id="btn-back-2">返回</button>' +
+      (n ? '<button class="btn-ghost danger" id="btn-rec-clear">清空全部</button>' : '') +
+      '</div></div>' +
+      '<div class="page-scroll">' + recordsListHtml() + '</div>';
+  }
+
+  function showRecordsPage(opts) {
+    if (!openPage('rec-list', recordsPageHtml(), opts)) return;
+    var el = $('#page-rec-list');
+    var back = $('#btn-back', el); if (back) back.addEventListener('click', closePage);
+    var back2 = $('#btn-back-2', el); if (back2) back2.addEventListener('click', closePage);
+    var cl = $('#btn-rec-clear', el);
+    if (cl) {
+      cl.addEventListener('click', function () {
+        if (!window.confirm('清空全部推荐记录？该操作不可恢复。')) return;
+        window.LR.clear();
+        refreshRecords();
+      });
+    }
+    bindRecordsEvents(el);
+  }
+
+  function refreshRecords() {
+    var el = $('#page-rec-list');
+    if (!el) return;
+    var view = $('.page-scroll', el);
+    if (view) view.innerHTML = recordsListHtml();
+    var note = $('#rec-count-note', el);
+    if (note) {
+      note.textContent = '共 ' + recCount() + ' 条 · 最多 ' + (window.LR ? window.LR.MAX : 200) + ' 条';
+    }
+    syncRecEntry();
+  }
+
+  function bindRecordsEvents(el) {
+    if (!el || !el.addEventListener) return;
+    el.addEventListener('click', function (e) {
+      var t = e.target;
+      var del = t.closest && t.closest('[data-del]');
+      if (del) {
+        e.stopPropagation();
+        if (!window.confirm('删除这条推荐记录？')) return;
+        window.LR.remove(del.getAttribute('data-del'));
+        refreshRecords();
+        return;
+      }
+      var cp = t.closest && t.closest('[data-copy]');
+      if (cp) {
+        e.stopPropagation();
+        var it = window.LR.get(cp.getAttribute('data-copy'));
+        if (!it) return;
+        copyText(it.text, function (ok) {
+          cp.textContent = ok ? '已复制 ✓' : '复制失败';
+          cp.classList.toggle('done', ok);
+          setTimeout(function () {
+            cp.textContent = '复制号码';
+            cp.classList.remove('done');
+          }, 1600);
+        });
+        return;
+      }
+      var item = t.closest && t.closest('.rec-item');
+      if (item) openCheckPage(item.getAttribute('data-id'));
+    });
+  }
+
+  /* ---------- 二级页：核对中奖 ---------- */
+
+  var checkTier = 'lt8';            // 大乐透奖池档位（核对页内可切换）
+
+  function levelName(kind, lv) {
+    var list = (window.LP && window.LP.RULES[kind]) || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].level === lv) return list[i].name;
+    }
+    return '';
+  }
+
+  // 命中的号码高亮（.hit），未命中的弱化（.miss）；drawn 为 null 表示还没开奖，不做标记
+  function hitBalls(nums, cls, drawn) {
+    return '<span class="balls">' + (nums || []).map(function (n) {
+      var mark = drawn ? (drawn.indexOf(n) >= 0 ? ' hit' : ' miss') : '';
+      return '<i class="ball ' + cls + mark + '">' + pad2(n) + '</i>';
+    }).join('') + '</span>';
+  }
+
+  // 投注号码：单式每注一行；复式 / 胆拖按主区 / 特别区分列
+  function betBallsHtml(it, draw, res) {
+    var c = LC.cfg(it.kind);
+    var b = it.bet;
+    var dr = draw ? (draw.r || []) : null;   // 没开奖时传 null：不做命中标记
+    var db = draw ? (draw.b || []) : null;
+
+    if (b.type === 'single') {
+      return '<div class="chk-lines">' + b.tickets.map(function (t, i) {
+        var p = res && res.perBet && res.perBet[i];
+        var lv = p ? p.level : 0;
+        var tag = res ? '<span class="chk-line-tag' + (lv ? ' win' : '') + '">' +
+          (lv ? levelName(it.kind, lv) : '未中奖') + '</span>' : '';
+        return '<div class="chk-line">' +
+          '<span class="chk-line-no">第 ' + (i + 1) + ' 注</span>' +
+          hitBalls(t.main, 'ball-main', dr) +
+          '<span class="ball-sep">+</span>' +
+          hitBalls(t.special, 'ball-special', db) +
+          tag + '</div>';
+      }).join('') + '</div>';
+    }
+
+    var rows = [];
+    function row(label, nums, cls, drawn) {
+      rows.push('<div class="bet-group"><span class="bet-group-label">' + label +
+        '</span>' + hitBalls(nums, cls, drawn) + '</div>');
+    }
+    if (b.type === 'dantuo' && b.dan && b.dan.length) {
+      row(c.mainLabel + '胆码', b.dan, 'ball-main', dr);
+      row(c.mainLabel + '拖码', b.tuo, 'ball-drag', dr);
+    } else {
+      row(c.mainLabel + '号码池', b.main, 'ball-main', dr);
+    }
+    if (b.type === 'dantuo' && b.sDan && b.sDan.length) {
+      row(c.specialLabel + '胆码', b.sDan, 'ball-special', db);
+      row(c.specialLabel + '拖码', b.sTuo, 'ball-special-drag', db);
+    } else {
+      row(c.specialLabel + '号码池', b.special, 'ball-special', db);
+    }
+    return '<div class="bet-groups">' + rows.join('') + '</div>';
+  }
+
+  function checkBodyHtml(it) {
+    var draw = window.LP.findDraw(it.kind, it.target);
+    var res = draw ? window.LP.check(it.kind, it.bet, draw, { tier: checkTier }) : null;
+
+    var banner;
+    if (!draw) {
+      banner = '<div class="chk-banner wait"><b>待开奖</b>' +
+        '<span>目标开奖日 ' + esc(it.target || '—') + '，开奖后回到这里就能核对</span></div>';
+    } else if (res.over) {
+      banner = '<div class="chk-banner wait"><b>组合过多，未判定</b>' +
+        '<span>这张票展开 ' + res.count.toLocaleString() + ' 注，超过 ' +
+        window.LP.MAX_EXPAND.toLocaleString() + ' 注上限</span></div>';
+    } else if (!res.hit) {
+      banner = '<div class="chk-banner miss"><b>本注未中奖</b>' +
+        '<span>第 ' + draw.i + ' 期 · 展开 ' + res.bets.toLocaleString() +
+        ' 注，没有一注符合任一奖级</span></div>';
+    } else {
+      banner = '<div class="chk-banner win"><b>¥' + res.fixedTotal.toLocaleString() + '</b>' +
+        '<span>恭喜中奖！固定奖合计（第 ' + draw.i + ' 期）</span></div>';
+    }
+
+    var floatHtml = '';
+    if (res && res.floatCounts && res.floatCounts.length) {
+      floatHtml = '<div class="chk-float">' + res.floatCounts.map(function (f) {
+        return f.name + ' ' + f.count + ' 注';
+      }).join('、') + ' · <b>浮动奖金额以官方公告为准</b></div>';
+    }
+
+    var infoHtml = '<div class="chk-info">' +
+      '<div class="chk-info-row"><span>玩法</span><b>' + esc(it.kindName) + '</b></div>' +
+      '<div class="chk-info-row"><span>投注方式</span><b>' + recBetTitle(it) + '</b></div>' +
+      '<div class="chk-info-row"><span>注数 / 金额</span><b>' + it.combos.toLocaleString() +
+      ' 注 · ' + it.cost.toLocaleString() + ' 元</b></div>' +
+      '<div class="chk-info-row"><span>推荐日期</span><b>' + esc(it.recDate) + '</b></div>' +
+      '<div class="chk-info-row"><span>目标开奖</span><b>' + esc(it.target || '—') +
+      (draw ? '（第 ' + draw.i + ' 期）' : '') + '</b></div>' +
+      '</div>';
+
+    var drawCard = '';
+    if (draw) {
+      drawCard = '<div class="card">' +
+        '<div class="card-head"><h3>开奖号码</h3>' +
+        '<span class="head-actions"><span class="badge">第 ' + draw.i + ' 期 · ' +
+        draw.d + '</span></span></div>' +
+        '<div class="chk-draw">' + ballsHtml(draw.r || [], 'main') +
+        '<span class="ball-sep">+</span>' + ballsHtml(draw.b || [], 'special') + '</div>' +
+        '</div>';
+    }
+
+    // 大乐透三~七等奖金额随奖池分两档，给个开关切换
+    var tierCard = '';
+    if (draw && it.kind === 'dlt') {
+      tierCard = '<div class="card">' +
+        '<div class="card-head"><h3>奖池档位</h3></div>' +
+        '<div class="chip-row">' +
+        '<button class="chip' + (checkTier === 'lt8' ? ' active' : '') +
+        '" data-tier="lt8">奖池 &lt;8 亿</button>' +
+        '<button class="chip' + (checkTier === 'ge8' ? ' active' : '') +
+        '" data-tier="ge8">奖池 ≥8 亿</button>' +
+        '</div>' +
+        '<p class="hint">奖池 &lt;8 亿：三~七等奖 5000 / 300 / 150 / 15 / 5 元；' +
+        '≥8 亿：6666 / 380 / 200 / 18 / 7 元。切换后立即重算。</p></div>';
+    }
+
+    var betCard = '<div class="card">' +
+      '<div class="card-head"><h3>您的投注号码</h3>' +
+      (draw ? '<span class="head-actions"><span class="badge">命中的号码已高亮</span></span>' : '') +
+      '</div>' + betBallsHtml(it, draw, res) +
+      (draw && res && !res.over
+        ? '<p class="hint">高亮 = 该号出现在本期开奖号码中' +
+          (res.bets > 1 ? '；这张票共展开 ' + res.bets.toLocaleString() + ' 注' : '') + '。</p>'
+        : '') +
+      '</div>';
+
+    var detailCard = '';
+    if (res && res.hit) {
+      detailCard = '<div class="card">' +
+        '<div class="card-head"><h3>中奖详情</h3></div>' +
+        res.levels.map(function (l) {
+          return '<div class="chk-level">' +
+            '<span class="chk-level-name">' + l.name + '<i>' + l.cond + '</i></span>' +
+            '<span class="chk-level-count">' + l.count + ' 注</span>' +
+            '<span class="chk-level-sum">' +
+            (l.float ? '浮动奖' : '¥' + l.sum.toLocaleString()) + '</span>' +
+            '</div>';
+        }).join('') +
+        '<div class="chk-total"><span>固定奖合计</span><b>¥' +
+        res.fixedTotal.toLocaleString() + '</b></div>' + floatHtml +
+        '</div>';
+    }
+
+    var footCard = '<div class="card">' +
+      '<div class="rec-item-actions">' +
+      '<button class="copy-btn" id="btn-check-copy">复制号码</button>' +
+      '<button class="link-btn danger" id="btn-check-del">删除该记录</button>' +
+      '</div>' +
+      '<p class="hint">奖级与固定奖金额按官方现行规则计算；' +
+      '一、二等奖为浮动奖，实际派奖以官方公告为准。</p>' +
+      '</div>';
+
+    return banner + '<div class="card">' + infoHtml + '</div>' +
+      drawCard + tierCard + betCard + detailCard + footCard;
+  }
+
+  function checkPageHtml(it) {
+    var c = LC.cfg(it.kind);
+    return '<header class="page-nav">' +
+      '<button class="back-btn" id="btn-back" aria-label="返回">‹</button>' +
+      '<div class="page-nav-text"><b>' + esc(c.name) + '核对中奖</b>' +
+      '<span>' + esc(it.recDate) + ' 推荐 · ' + recBetTitle(it) + '</span></div>' +
+      '</header>' +
+      '<div class="page-scroll">' + checkBodyHtml(it) + '</div>';
+  }
+
+  function openCheckPage(id) {
+    var it = window.LR.get(id);
+    if (!it) return;
+    checkTier = 'lt8';
+    var el = openPage('rec-check', checkPageHtml(it));
+    if (!el) return;
+    bindCheckEvents(el, it);
+  }
+
+  function bindCheckEvents(el, it) {
+    if (!el) return;
+    var back = $('#btn-back', el);
+    if (back) back.addEventListener('click', closePage);
+    var cp = $('#btn-check-copy', el);
+    if (cp) {
+      cp.addEventListener('click', function () {
+        copyText(it.text, function (ok) {
+          cp.textContent = ok ? '已复制 ✓' : '复制失败';
+          cp.classList.toggle('done', ok);
+          setTimeout(function () {
+            cp.textContent = '复制号码';
+            cp.classList.remove('done');
+          }, 1600);
+        });
+      });
+    }
+    var del = $('#btn-check-del', el);
+    if (del) {
+      del.addEventListener('click', function () {
+        if (!window.confirm('删除这条推荐记录？')) return;
+        window.LR.remove(it.id);
+        closePage();
+        refreshRecords();
+      });
+    }
+    $$('[data-tier]', el).forEach(function (b) {
+      b.addEventListener('click', function () {
+        checkTier = b.getAttribute('data-tier');
+        refreshCheck(it);
+      });
+    });
+  }
+
+  function refreshCheck(it) {
+    var el = $('#page-rec-check');
+    if (!el) return;
+    var view = $('.page-scroll', el);
+    if (view) view.innerHTML = checkBodyHtml(it);
+    // 只重绑内容区：返回键在 header 里没被重绘，重复绑定没必要
+    bindCheckEvents(view, it);
   }
 
   /* ---------- 二级页：历史开奖记录 ---------- */
@@ -981,6 +1415,7 @@
       '<div class="gen-sum">本次将生成 <b>' + pv.combos.toLocaleString() + '</b> 注，' +
       '共 <b>' + pv.cost.toLocaleString() + '</b> 元</div>' +
       '<button class="btn-primary" id="btn-generate">生成推荐号码</button>' +
+      '<button class="btn-ghost" id="btn-rec-list">推荐记录（' + recCount() + '）</button>' +
       '<p class="hint">' + hint + '</p>' +
       '</div>';
 
@@ -993,6 +1428,9 @@
         showResultPage();
       });
     }
+
+    var recBtn = $('#btn-rec-list');
+    if (recBtn) recBtn.addEventListener('click', function () { showRecordsPage(); });
 
     function rerenderSettings() {
       renderRecommend();
@@ -1718,6 +2156,7 @@
     var box = $('#rec-result');
     if (!box) return;
     var rec = buildRecommendation(forceNewSeed);
+    saveRecommendRecord(rec);      // 一次推荐 = 一条记录
     var c = rec.config;
     var ticketsHtml;
 
