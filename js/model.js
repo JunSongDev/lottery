@@ -1,15 +1,19 @@
 /* ============================================================
- * model.js — 混合评分推荐模型 + 滚动回测
+ * model.js — 混合评分模型 + 滚动回测
  * 全局命名空间：window.LM
- * 依赖：LC / LS
+ * 依赖：LC
  *
- * 模型结构
+ * 说明（2026）：出号已统一走「避拥挤」引擎（js/crowd.js），
+ * 本模块不再负责生号，只保留两块仍被界面使用的能力：
+ *   1. computeWeights   —— 滚动回测（「回测验证」面板）
+ *   2. betOptions / dtFormLabel / combinationOdds —— 投注方式参数与概率参考
+ *
+ * 模型结构（供回测参考）
  *   单号因子（4 个）：
  *     freq        长期频率偏离（贝叶斯收缩后的 z 值）
  *     omission    遗漏回归（按历史遗漏分桶的经验出现率提升）
  *     hot         近期热度（指数加权移动平均的 z 值）
  *     transition  马尔可夫转移（以上期为条件的共现提升）
- *   组合层：结构典型度评分（完全由历史分布定义）
  *   权重：由滚动回测中各因子的 Top-K 命中表现自适应学习
  * ============================================================ */
 (function (root) {
@@ -26,19 +30,7 @@
     { label: '41 期以上', lo: 41, hi: Infinity }
   ];
 
-  function zscore(arr) {
-    var m = LC.mean(arr), s = LC.stdev(arr);
-    if (s < 1e-9) return arr.map(function () { return 0; });
-    return arr.map(function (x) { return (x - m) / s; });
-  }
-
-  /* 取末尾 n 条（n 为 0 或超过长度时返回全部） */
-  function lastN(arr, n) {
-    if (!n || n >= arr.length) return arr;
-    return arr.slice(arr.length - n);
-  }
-
-  function relu(x) { return x > 0 ? x : 0; }
+  var zscore = LC.zscore;                  // 通用实现见 lotto-core.js
 
   /* ============================================================
    * 增量统计状态：一次遍历同时维护频率 / 遗漏 / EWMA / 转移矩阵
@@ -252,112 +244,6 @@
   }
 
   /* ============================================================
-   * 结构典型度：完全由历史分布定义（经验概率）
-   * ========================================================== */
-  function buildStructureContext(draws, c) {
-    var sums = draws.map(function (d) { return LC.sum(d.r); });
-    var spans = draws.map(function (d) { return LC.span(d.r); });
-    var odd = LC.tally(draws.map(function (d) { return LC.oddCount(d.r); }));
-    var big = LC.tally(draws.map(function (d) { return LC.bigCount(d.r, c); }));
-    var cons = LC.tally(draws.map(function (d) { return LC.consecutiveCount(d.r); }));
-    var reps = [];
-    for (var i = 1; i < draws.length; i++) reps.push(LC.repeatCount(draws[i].r, draws[i - 1].r));
-    var repT = LC.tally(reps);
-    var zone = {};
-    draws.forEach(function (d) {
-      var zd = LC.zoneDistribution(d.r, c, 3).join(':');
-      zone[zd] = (zone[zd] || 0) + 1;
-    });
-
-    function toMap(list) {
-      var m = {};
-      list.forEach(function (x) { m[x.key] = x.ratio; });
-      return m;
-    }
-
-    var maxSumRatio = Math.max.apply(null, LC.histogram(sums, 24).counts.map(function (x) { return x / sums.length; }));
-    var maxSpanRatio = Math.max.apply(null, LC.histogram(spans, 12).counts.map(function (x) { return x / spans.length; }));
-    var maxZone = Math.max.apply(null, Object.keys(zone).map(function (k) { return zone[k]; }));
-
-    return {
-      sumHist: LC.histogram(sums, 24), sumMax: maxSumRatio,
-      spanHist: LC.histogram(spans, 12), spanMax: maxSpanRatio,
-      oddMap: toMap(odd), oddMax: Math.max.apply(null, odd.map(function (x) { return x.ratio; })),
-      bigMap: toMap(big), bigMax: Math.max.apply(null, big.map(function (x) { return x.ratio; })),
-      consMap: toMap(cons), consMax: Math.max.apply(null, cons.map(function (x) { return x.ratio; })),
-      repMap: toMap(repT), repMax: Math.max.apply(null, repT.map(function (x) { return x.ratio; })),
-      zoneMap: zone, zoneMax: maxZone,
-      sumMu: LC.mean(sums), sumSd: LC.stdev(sums),
-      zoneCount: 3, c: c
-    };
-  }
-
-  function histRatio(hist, v) {
-    if (!hist.counts.length) return 0;
-    var idx = Math.floor((v - hist.min) / hist.width);
-    idx = Math.max(0, Math.min(hist.counts.length - 1, idx));
-    var total = hist.counts.reduce(function (a, b) { return a + b; }, 0);
-    return total ? hist.counts[idx] / total : 0;
-  }
-
-  // 返回 0~1 的结构典型度
-  function scoreStructure(combo, ctx, prevMain) {
-    var c = ctx.c;
-    var sum = LC.sum(combo), sp = LC.span(combo);
-    var odd = LC.oddCount(combo), big = LC.bigCount(combo, c);
-    var cons = LC.consecutiveCount(combo);
-    var rep = prevMain ? LC.repeatCount(combo, prevMain) : 0;
-    var zoneKey = LC.zoneDistribution(combo, c, 3).join(':');
-
-    var sSum = ctx.sumMax ? histRatio(ctx.sumHist, sum) / ctx.sumMax : 0;
-    var sSpan = ctx.spanMax ? histRatio(ctx.spanHist, sp) / ctx.spanMax : 0;
-    var sOdd = (ctx.oddMap[odd] || 0) / ctx.oddMax;
-    var sBig = (ctx.bigMap[big] || 0) / ctx.bigMax;
-    var sCons = (ctx.consMap[cons] || 0) / ctx.consMax;
-    var sRep = (ctx.repMap[rep] || 0) / ctx.repMax;
-    var sZone = (ctx.zoneMap[zoneKey] || 0) / ctx.zoneMax;
-
-    var score = 0.20 * sSum + 0.12 * sSpan + 0.15 * sOdd + 0.15 * sBig
-      + 0.08 * sCons + 0.07 * sRep + 0.23 * sZone;
-
-    return {
-      score: score,
-      parts: {
-        sum: sSum, span: sSpan, odd: sOdd, big: sBig,
-        consecutive: sCons, repeat: sRep, zone: sZone
-      },
-      features: {
-        sum: sum, span: sp, odd: odd, big: big,
-        consecutive: cons, repeat: rep, zone: zoneKey
-      }
-    };
-  }
-
-  /* ============================================================
-   * 加权无放回采样
-   * ========================================================== */
-  function weightedSample(weights, k, rnd) {
-    var n = weights.length, j;
-    var avail = weights.slice();
-    var total = 0;
-    for (j = 0; j < n; j++) total += avail[j];
-    var picked = [];
-    for (var i = 0; i < k; i++) {
-      if (total <= 0) break;
-      var r = rnd() * total, acc = 0, pick = -1;
-      for (j = 0; j < n; j++) {
-        acc += avail[j];
-        if (acc >= r) { pick = j; break; }
-      }
-      if (pick < 0) { for (j = n - 1; j >= 0; j--) if (avail[j] > 0) { pick = j; break; } }
-      picked.push(pick);
-      total -= avail[pick];
-      avail[pick] = 0;
-    }
-    return picked;
-  }
-
-  /* ============================================================
    * 权重学习：滚动回测中比较各因子 Top-K 命中表现
    * ========================================================== */
   function computeWeights(kind, opts) {
@@ -378,13 +264,14 @@
 
     var factorKeys = ['freq', 'omission', 'hot', 'transition'];
     var w = { freq: 0.25, omission: 0.25, hot: 0.25, transition: 0.25 };
+    var f = null;
 
     for (var t = start; t < all.length; t++) {
       if (t - liftAnchor >= 50) {
         liftTable = buildOmissionLift(all, c, t, false);
         liftAnchor = t;
       }
-      var f = computeFactors(st, false, liftTable);
+      f = computeFactors(st, false, liftTable);
       var actual = all[t].r;
       var actualSet = {};
       actual.forEach(function (x) { actualSet[x] = 1; });
@@ -473,15 +360,6 @@
    *           注数 = C(主区拖码个数, mainCount - 胆码个数)
    *                × C(特别区拖码个数, specialCount - 特别区胆码个数)
    *           官方要求"胆码 + 拖码 ≥ 基本号码数 + 1"，即拖码至少比单式多出 1 个号码。
-   *
-   *   特别区（蓝球 / 后区）能否胆拖，取决于该区每注取几个号码：
-   *     - 每注只取 1 个（双色球蓝球）：胆码 1 个 + 拖码 n 个时，每注要从拖码里
-   *       再补 specialCount - 1 = 0 个，组合数恒为 1，数学上退化成单式。
-   *       官方规则也只写"蓝球号码可选 1 个或多个"，不设胆拖。
-   *     - 每注取 2 个（大乐透后区）：官方明确支持，且细分三种胆拖形式——
-   *         前区胆拖：前区 1~4 个胆码（胆+拖 ≥ 6 个），后区直接选满 2 个
-   *         后区胆拖：前区直接选满 5 个，后区 1 个胆码 + 2 个及以上拖码
-   *         双区胆拖：前区胆拖 + 后区胆拖
    * ========================================================== */
 
   // 可选范围：在官方规则上限内收一个便于操作的区间
@@ -531,284 +409,6 @@
     return c.mainLabel + '胆拖';
   }
 
-  function clampInt(v, lo, hi) {
-    v = Number(v);
-    if (v == null || isNaN(v)) return lo;
-    return Math.min(Math.max(Math.round(v), lo), hi);
-  }
-
-  function takeTopN(poolScores, n) {
-    return poolScores.slice(0, n).map(function (o) { return o.num; })
-      .sort(function (a, b) { return a - b; });
-  }
-
-  function combosOf(arr, k) {
-    var out = [];
-    (function rec(start, cur) {
-      if (cur.length === k) { out.push(cur.slice()); return; }
-      for (var i = start; i < arr.length; i++) {
-        cur.push(arr[i]); rec(i + 1, cur); cur.pop();
-      }
-    })(0, []);
-    return out;
-  }
-
-  // 展开后组合的结构典型度均值（组合数过多时跳过，避免卡顿）
-  function avgStructure(list, need, ctx, prevMain, prefix) {
-    if (LC.comb(list.length, need) > 800) return null;
-    var all = combosOf(list, need), s = 0;
-    if (!all.length) return null;
-    all.forEach(function (cmb) {
-      var combo = prefix ? prefix.concat(cmb).sort(function (a, b) { return a - b; }) : cmb;
-      s += scoreStructure(combo, ctx, prevMain).score;
-    });
-    return s / all.length;
-  }
-
-  function buildBet(type, bo, options, c, poolMain, poolSpec, ctx, prevMain) {
-    var k = c.mainCount, sk = c.specialCount;
-
-    if (type === 'compound') {
-      var cMainSel = clampInt(options.mainSel, bo.mainSelMin, bo.mainSelMax);
-      var cSpecSel = clampInt(options.specialSel, bo.specialSelMin, bo.specialSelMax);
-      var cMain = takeTopN(poolMain, cMainSel);
-      var cSpec = takeTopN(poolSpec, cSpecSel);
-      var cCombos = LC.comb(cMainSel, k) * LC.comb(cSpecSel, sk);
-      return {
-        type: 'compound', label: '复式', dtForm: null,
-        main: cMain, dan: null, tuo: null, special: cSpec,
-        sDan: null, sTuo: null,
-        mainSel: cMainSel, specialSel: cSpecSel,
-        danCount: 0, tuoCount: 0, sDanCount: 0, sTuoCount: 0,
-        combos: cCombos, cost: cCombos * bo.yuanPerBet, yuanPerBet: bo.yuanPerBet,
-        structureAvg: avgStructure(cMain, k, ctx, prevMain),
-        formula: 'C(' + cMainSel + ',' + k + ') × C(' + cSpecSel + ',' + sk + ')'
-      };
-    }
-
-    // ---- 胆拖：主区胆拖 / 特别区胆拖 / 双区胆拖 ----
-    var form = (bo.supportsSpecialDantuo && (options.dtForm === 'special' || options.dtForm === 'both'))
-      ? options.dtForm : 'main';
-
-    // 特别区部分
-    var special, specialSel = 0, sDan = null, sTuo = null, sDanCount = 0, sTuoCount = 0;
-    var specCombos;
-    if (form === 'main') {
-      specialSel = clampInt(options.specialSel, bo.specialSelMin, bo.specialSelMax);
-      special = takeTopN(poolSpec, specialSel);
-      specCombos = LC.comb(specialSel, sk);
-    } else {
-      // 特别区胆拖：胆码固定 1 个，拖码在胆码之外按评分顺序取
-      sDanCount = clampInt(options.sDanCount, bo.specDanMin, bo.specDanMax);
-      var sTuoMax = Math.max(bo.specTuoMin, Math.min(bo.specTuoMax, bo.specPool - sDanCount));
-      sTuoCount = clampInt(options.sTuoCount, bo.specTuoMin, sTuoMax);
-      sDan = takeTopN(poolSpec, sDanCount);
-      sTuo = poolSpec.slice(sDanCount, sDanCount + sTuoCount)
-        .map(function (o) { return o.num; }).sort(function (a, b) { return a - b; });
-      special = sDan.concat(sTuo).sort(function (a, b) { return a - b; });
-      specialSel = sDanCount + sTuoCount;
-      specCombos = LC.comb(sTuoCount, sk - sDanCount);
-    }
-
-    // 主区部分
-    var dan = null, tuo = null, danCount = 0, tuoCount = 0, main, mainSel, mainCombos;
-    if (form === 'special') {
-      // 主区不设胆拖，直接选满
-      mainSel = k;
-      main = takeTopN(poolMain, k);
-      mainCombos = 1;
-    } else {
-      danCount = clampInt(options.danCount, bo.danMin, bo.danMax);
-      var tuoMin = Math.max(k + bo.tuoExtraMin - danCount, 1);
-      var tuoMax = Math.max(tuoMin, Math.min(bo.mainSelMax - danCount, bo.mainPool - danCount));
-      tuoCount = clampInt(options.tuoCount, tuoMin, tuoMax);
-      dan = takeTopN(poolMain, danCount);
-      tuo = poolMain.slice(danCount, danCount + tuoCount)
-        .map(function (o) { return o.num; }).sort(function (a, b) { return a - b; });
-      main = dan.concat(tuo).sort(function (a, b) { return a - b; });
-      mainSel = danCount + tuoCount;
-      mainCombos = LC.comb(tuoCount, k - danCount);
-    }
-
-    var combos = mainCombos * specCombos;
-    var mFormula = 'C(' + tuoCount + ',' + (k - danCount) + ')';
-    var sFormula = 'C(' + sTuoCount + ',' + (sk - sDanCount) + ')';
-
-    return {
-      type: 'dantuo', dtForm: form, label: dtFormLabel(bo.kind, form),
-      main: main, dan: dan, tuo: tuo, special: special,
-      sDan: sDan, sTuo: sTuo,
-      danCount: danCount, tuoCount: tuoCount,
-      sDanCount: sDanCount, sTuoCount: sTuoCount,
-      mainSel: mainSel, specialSel: specialSel,
-      combos: combos, cost: combos * bo.yuanPerBet, yuanPerBet: bo.yuanPerBet,
-      structureAvg: form === 'special'
-        ? avgStructure(main, k, ctx, prevMain)
-        : avgStructure(tuo, k - danCount, ctx, prevMain, dan),
-      formula: form === 'special' ? sFormula : mFormula + ' × ' + sFormula
-    };
-  }
-
-  /* ============================================================
-   * 生成推荐号码
-   * ========================================================== */
-  function recommend(kind, options) {
-    options = options || {};
-    var all = LC.draws(kind), c = LC.cfg(kind);
-    var halflife = options.halflife || 30;
-    var samples = options.samples || 20000;
-    var ticketCount = options.tickets || options.ticketCount || 5;
-    var temperature = options.temperature || 1.0;
-    var windowSize = options.window || 0;
-    var seed = options.seed || (Date.now() & 0x7fffffff);
-    var rnd = LC.mulberry32(seed);
-
-    var drawsForContext = lastN(all, windowSize);
-    var st = buildState(c, all, all.length, halflife);
-    var liftMain = buildOmissionLift(all, c, all.length, false);
-    var liftSpec = buildOmissionLift(all, c, all.length, true);
-
-    var weights = options.weights || { freq: 0.25, omission: 0.25, hot: 0.25, transition: 0.25 };
-    var factorKeys = ['freq', 'omission', 'hot', 'transition'];
-
-    var fMain = computeFactors(st, false, liftMain);
-    var fSpec = computeFactors(st, true, liftSpec);
-
-    function combine(f) {
-      var score = new Array(f.pool).fill(0);
-      factorKeys.forEach(function (key) {
-        var zk = f.z[key];
-        for (var i = 0; i < f.pool; i++) score[i] += (weights[key] || 0) * zk[i];
-      });
-      return score;
-    }
-
-    var scoreMain = combine(fMain);
-    var scoreSpec = combine(fSpec);
-
-    var poolScoresMain = scoreMain.map(function (v, idx) {
-      var o = { num: idx + fMain.min, score: v, factors: {} };
-      factorKeys.forEach(function (key) { o.factors[key] = fMain.z[key][idx]; });
-      return o;
-    }).sort(function (a, b) { return b.score - a.score; });
-    poolScoresMain.forEach(function (o, i) { o.rank = i + 1; });
-
-    var poolScoresSpec = scoreSpec.map(function (v, idx) {
-      var o = { num: idx + fSpec.min, score: v, factors: {} };
-      factorKeys.forEach(function (key) { o.factors[key] = fSpec.z[key][idx]; });
-      return o;
-    }).sort(function (a, b) { return b.score - a.score; });
-    poolScoresSpec.forEach(function (o, i) { o.rank = i + 1; });
-
-    // 采样权重：softmax（保证任何号码都有非零概率，避免"排除法"的伪确定性）
-    function samplingWeights(score) {
-      var w = score.map(function (v) { return Math.exp(v * temperature); });
-      var s = 0; w.forEach(function (x) { s += x; });
-      return s > 0 ? w.map(function (x) { return x / s; }) : w.map(function () { return 1 / w.length; });
-    }
-
-    var ctx = buildStructureContext(drawsForContext, c);
-    var prevMain = drawsForContext[drawsForContext.length - 1].r;
-    var betType = options.betType || 'single';
-
-    var base = {
-      kind: kind, config: c,
-      windowSize: drawsForContext.length,
-      latest: all[all.length - 1],
-      prevMain: prevMain,
-      weights: weights,
-      betType: betType,
-      poolScores: poolScoresMain,
-      specialScores: poolScoresSpec,
-      liftMain: liftMain,
-      liftSpec: liftSpec,
-      structureContext: {
-        sumMu: ctx.sumMu, sumSd: ctx.sumSd,
-        sumRange: [ctx.sumHist.edges[Math.floor(ctx.sumHist.edges.length * 0.1)],
-          ctx.sumHist.edges[Math.floor(ctx.sumHist.edges.length * 0.9)]]
-      },
-      seed: seed,
-      samples: samples,
-      tickets: [],
-      candidateCount: 0
-    };
-
-    // 复式 / 胆拖：按号码综合评分取前 N 名，结果为确定性输出
-    if (betType === 'compound' || betType === 'dantuo') {
-      base.bet = buildBet(betType, betOptions(kind), options, c,
-        poolScoresMain, poolScoresSpec, ctx, prevMain);
-      return base;
-    }
-
-    var wMain = samplingWeights(scoreMain);
-    var wSpec = samplingWeights(scoreSpec);
-
-    var candidates = [];
-    var maxZ = Math.max.apply(null, scoreMain);
-    var minZ = Math.min.apply(null, scoreMain);
-    var rangeZ = Math.max(maxZ - minZ, 1e-9);
-
-    for (var s = 0; s < samples; s++) {
-      var idxs = weightedSample(wMain, c.mainCount, rnd);
-      if (idxs.length < c.mainCount) continue;
-      var combo = idxs.map(function (i) { return i + fMain.min; })
-        .sort(function (a, b) { return a - b; });
-      var stc = scoreStructure(combo, ctx, prevMain);
-      var factorScore = 0;
-      idxs.forEach(function (i) { factorScore += (scoreMain[i] - minZ) / rangeZ; });
-      factorScore /= c.mainCount;
-      var total = 0.55 * factorScore + 0.45 * stc.score;
-      candidates.push({
-        main: combo, structureScore: stc.score, structure: stc.parts,
-        features: stc.features, factorScore: factorScore, total: total
-      });
-    }
-
-    candidates.sort(function (a, b) { return b.total - a.total; });
-
-    // 多样性筛选：组合间重叠不超过 60%
-    var picked = [];
-    var maxOverlap = Math.round(c.mainCount * 0.6);
-    for (var ci = 0; ci < candidates.length && picked.length < ticketCount * 6; ci++) {
-      var cand = candidates[ci];
-      var ok = true;
-      for (var pi = 0; pi < picked.length; pi++) {
-        var ov = 0;
-        for (var a = 0; a < cand.main.length; a++)
-          if (picked[pi].main.indexOf(cand.main[a]) >= 0) ov++;
-        if (ov > maxOverlap) { ok = false; break; }
-      }
-      if (ok) picked.push(cand);
-    }
-    picked = picked.slice(0, ticketCount);
-
-    // 特别号：按得分顺序轮转分配，保证高分号码被覆盖
-    var specOrder = poolScoresSpec.map(function (o) { return o.num; });
-    picked.forEach(function (t, i) {
-      var spec = [];
-      for (var k = 0; k < c.specialCount; k++) {
-        spec.push(specOrder[(i * c.specialCount + k) % specOrder.length]);
-      }
-      t.special = spec.sort(function (a, b) { return a - b; });
-      t.mainDetail = t.main.map(function (n) {
-        var o = poolScoresMain.filter(function (x) { return x.num === n; })[0];
-        return { num: n, score: o.score, rank: o.rank, factors: o.factors };
-      });
-      t.specialDetail = t.special.map(function (n) {
-        var o = poolScoresSpec.filter(function (x) { return x.num === n; })[0];
-        return { num: n, score: o.score, rank: o.rank, factors: o.factors };
-      });
-    });
-
-    base.tickets = picked;
-    base.candidateCount = candidates.length;
-    base.bet = {
-      type: 'single', label: '单式',
-      combos: picked.length, cost: picked.length * 2, yuanPerBet: 2
-    };
-    return base;
-  }
-
   /* ============================================================
    * 组合概率参考（用于让用户理解"概率有多小"）
    * ========================================================== */
@@ -831,10 +431,7 @@
     buildState: buildState,
     buildOmissionLift: buildOmissionLift,
     computeFactors: computeFactors,
-    buildStructureContext: buildStructureContext,
-    scoreStructure: scoreStructure,
     computeWeights: computeWeights,
-    recommend: recommend,
     betOptions: betOptions,
     dtFormLabel: dtFormLabel,
     combinationOdds: combinationOdds,

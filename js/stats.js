@@ -90,40 +90,6 @@
     return { list: list, total: total };
   }
 
-  /* ---------- 指数加权近期热度 ---------- */
-
-  function ewma(draws, c, isSpecial, halflife) {
-    var total = draws.length;
-    var min = isSpecial ? c.specialMin : c.mainMin;
-    var max = isSpecial ? c.specialMax : c.mainMax;
-    var score = {}, wsum = 0;
-    for (var n = min; n <= max; n++) score[n] = 0;
-
-    var lambda = Math.log(2) / Math.max(halflife, 1);
-    for (var i = total - 1; i >= 0; i--) {
-      var age = total - 1 - i;
-      var w = Math.exp(-lambda * age);
-      wsum += w;
-      var arr = isSpecial ? draws[i].b : draws[i].r;
-      for (var j = 0; j < arr.length; j++) score[arr[j]] += w;
-    }
-
-    var pick = isSpecial ? c.specialCount : c.mainCount;
-    var pool = max - min + 1;
-    var theo = wsum * pick / pool;
-    var sd = Math.sqrt(Math.max(theo * (1 - pick / pool), 1e-9));
-
-    var list = [];
-    for (var k = min; k <= max; k++) {
-      list.push({
-        num: k, score: score[k],
-        norm: theo ? score[k] / theo : 1,
-        z: (score[k] - theo) / sd
-      });
-    }
-    return { list: list, halflife: halflife };
-  }
-
   /* ---------- 和值 / 跨度 ---------- */
 
   function valueStats(draws, c, fn) {
@@ -225,17 +191,11 @@
     var all = LC.draws(kind);
     var windowSize = opts.window || 0;             // 0 = 全部
     var draws = last(all, windowSize);
-    var halflife = opts.halflife || 30;
 
     var fMain = frequency(draws, c, false);
     var fSpec = frequency(draws, c, true);
     var oMain = omission(draws, c, false);
-    var oSpec = omission(draws, c, true);
-    var eMain = ewma(draws, c, false, halflife);
-    var eSpec = ewma(draws, c, true, halflife);
     var sums = valueStats(draws, c, function (r) { return LC.sum(r); });
-    var spans = valueStats(draws, c, function (r) { return LC.span(r); });
-    var acs = valueStats(draws, c, function (r) { return LC.acValue(r); });
 
     var oddEven = shapeDistribution(draws, c, function (r) { return LC.oddCount(r); });
     var bigSmall = shapeDistribution(draws, c, function (r) { return LC.bigCount(r, c); });
@@ -243,19 +203,18 @@
     var repeat = repeatDistribution(draws);
 
     var zones3 = zoneDistribution(draws, c, 3);
-    var zones4 = zoneDistribution(draws, c, 4);
 
     return {
       config: c,
       windowSize: draws.length,
       totalAll: all.length,
       draws: draws,
-      main: { freq: fMain, omission: oMain, ewma: eMain, tail: tailDistribution(draws, c, false) },
-      special: { freq: fSpec, omission: oSpec, ewma: eSpec, tail: tailDistribution(draws, c, true) },
-      sum: sums, span: spans, ac: acs,
+      main: { freq: fMain, omission: oMain, tail: tailDistribution(draws, c, false) },
+      special: { freq: fSpec },
+      sum: sums,
       oddEven: oddEven, bigSmall: bigSmall,
       consecutive: consecutive, repeat: repeat,
-      zones3: zones3, zones4: zones4,
+      zones3: zones3,
       first: draws[0], latest: draws[draws.length - 1]
     };
   }
@@ -264,7 +223,6 @@
     last: last,
     frequency: frequency,
     omission: omission,
-    ewma: ewma,
     valueStats: valueStats,
     shapeDistribution: shapeDistribution,
     zoneDistribution: zoneDistribution,

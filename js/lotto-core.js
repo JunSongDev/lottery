@@ -121,6 +121,36 @@
     return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
   }
 
+  // 数组 z 值标准化（标准差过小时返回全 0）
+  function zscore(arr) {
+    var m = mean(arr), s = stdev(arr);
+    if (s < 1e-9) return arr.map(function () { return 0; });
+    return arr.map(function (x) { return (x - m) / s; });
+  }
+
+  // 加权无放回采样：按 weights 抽 k 个下标（配 mulberry32 使用，结果可复现）
+  function weightedSample(weights, k, rnd) {
+    var n = weights.length, j;
+    var avail = weights.slice();
+    var total = 0;
+    for (j = 0; j < n; j++) total += avail[j];
+    var picked = [];
+    for (var i = 0; i < k; i++) {
+      if (total <= 0) break;
+      var r = rnd() * total, acc = 0, pick = -1;
+      for (j = 0; j < n; j++) {
+        acc += avail[j];
+        if (acc >= r) { pick = j; break; }
+      }
+      if (pick < 0) { for (j = n - 1; j >= 0; j--) if (avail[j] > 0) { pick = j; break; } }
+      if (pick < 0) break;
+      picked.push(pick);
+      total -= avail[pick];
+      avail[pick] = 0;
+    }
+    return picked;
+  }
+
   /* ---------------- 伪随机（可复现） ---------------- */
 
   function mulberry32(seed) {
@@ -325,6 +355,7 @@
     normalCDF: normalCDF, normalTwoTail: normalTwoTail,
     comb: comb, hypergeom: hypergeom,
     mean: mean, stdev: stdev, quantile: quantile, pearson: pearson,
+    zscore: zscore, weightedSample: weightedSample,
     mulberry32: mulberry32,
     meta: meta, draws: draws, cfg: cfg, patchDraws: patchDraws,
     mainRange: mainRange, specialRange: specialRange,

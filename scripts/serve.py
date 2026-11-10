@@ -4,11 +4,11 @@
 本地预览服务（零第三方依赖）
 
 为什么需要它：
-  · 双色球接口（jc.zhcw.com/port/client_json.php）强制校验 Referer ——
-    请求不带 Referer 时它返回 200 + 空 body，且不返回 CORS 头，
-    浏览器侧就表现为"请求失败"；而 Referer 是 forbidden header，
-    页面里的 JS 无法伪造，file:// 直接打开时浏览器根本不发 Referer。
-  · 大乐透接口（体彩官网）虽然开放 CORS，但同样依赖浏览器发得出跨域请求。
+  · 官方开奖接口不再返回 CORS 头（双色球走 cwl.gov.cn，大乐透走
+    webapi.sporttery.cn），浏览器侧 fetch 会被拦截，表现为"请求失败"；
+    而 Referer 是 forbidden header，页面里的 JS 无法伪造，
+    file:// 直接打开时浏览器根本不发 Referer。
+  · 大乐透接口（体彩官网）虽开放 CORS，但同样依赖浏览器发得出跨域请求。
 
   本服务做两件事：
     1. 静态托管项目目录（index.html / js / css / data ...）；

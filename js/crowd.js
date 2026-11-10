@@ -90,11 +90,7 @@
 
   function clamp(x, lo, hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
-  function zscore(arr) {
-    var m = LC.mean(arr), s = LC.stdev(arr);
-    if (s < 1e-9) return arr.map(function () { return 0; });
-    return arr.map(function (x) { return (x - m) / s; });
-  }
+  var zscore = LC.zscore;                  // 通用实现见 lotto-core.js
 
   // 最长连号长度：相邻差为 1 的连续段长度（无连号返回 1）
   function longestRun(nums) {
@@ -151,27 +147,14 @@
     return c.mainMin + v;
   }
 
-  // 加权无放回采样（返回下标数组）
-  function weightedSample(weights, k, rnd) {
-    var n = weights.length, j;
-    var avail = weights.slice();
-    var total = 0;
-    for (j = 0; j < n; j++) total += avail[j];
-    var picked = [];
-    for (var i = 0; i < k; i++) {
-      if (total <= 0) break;
-      var r = rnd() * total, acc = 0, pick = -1;
-      for (j = 0; j < n; j++) {
-        acc += avail[j];
-        if (acc >= r) { pick = j; break; }
-      }
-      if (pick < 0) { for (j = n - 1; j >= 0; j--) if (avail[j] > 0) { pick = j; break; } }
-      if (pick < 0) break;
-      picked.push(pick);
-      total -= avail[pick];
-      avail[pick] = 0;
-    }
-    return picked;
+  // 加权无放回采样（返回下标数组）—— 通用实现见 lotto-core.js
+  var weightedSample = LC.weightedSample;
+
+  // 把「按拥挤度升序」的号码列表转成 num → 对象 索引，供 O(1) 取单个号码详情
+  function indexByNum(list) {
+    var m = {};
+    list.forEach(function (o) { m[o.num] = o; });
+    return m;
   }
 
   /* ---------- 文本 → 数字（L2 提数字） ---------- */
@@ -764,6 +747,8 @@
     var ctx = buildContext(kind, opts);
     var nc = buildNumberCrowd(kind, opts);
     var sc = buildSpecialCrowd(kind, opts);
+    var ncByNum = indexByNum(nc.list);      // num → 拥挤度对象，避免逐号 filter 查找
+    var scByNum = indexByNum(sc.list);
     var hotPool = parseHotPool(kind, opts.hotPool);
 
     // P4 自我重复：历史自买（手工录入）
@@ -872,11 +857,11 @@
       t.special = spec.slice().sort(ascNum);
       spec.forEach(function (n) { used[n] = 1; });
       t.mainDetail = t.main.map(function (n) {
-        var o = nc.list.filter(function (x) { return x.num === n; })[0];
+        var o = ncByNum[n];
         return { num: n, crowd: o.crowd, parts: o.parts, rank: o.rank };
       });
       t.specialDetail = t.special.map(function (n) {
-        var o = sc.list.filter(function (x) { return x.num === n; })[0];
+        var o = scByNum[n];
         return { num: n, crowd: o.crowd, parts: o.parts, rank: o.rank };
       });
     });
@@ -898,7 +883,7 @@
       kind: kind,
       config: c,
       seed: seed,
-      windowSize: nc.list.length,
+      windowSize: ctx.windowSize,
       latest: all[all.length - 1],
       prevMain: ctx.prevMain,
       tickets: tickets,
@@ -1175,6 +1160,8 @@
     var ctx = buildContext(kind, opts);
     var nc = buildNumberCrowd(kind, opts);
     var sc = buildSpecialCrowd(kind, opts);
+    var ncByNum = indexByNum(nc.list);      // num → 拥挤度对象，避免逐号 filter 查找
+    var scByNum = indexByNum(sc.list);
     var hotPool = parseHotPool(kind, opts.hotPool);
     var selfSet = parseHotPool(kind, opts.selfPick);
     var luckMain = luckBoost(kind, opts.luck, c.mainMin, c.mainMax);
@@ -1260,7 +1247,7 @@
     var mainNums = finalSel.dan.concat(finalSel.tuo).sort(ascNum);
     function detailOf(nums, roleOf) {
       return nums.map(function (n) {
-        var o = nc.list.filter(function (x) { return x.num === n; })[0];
+        var o = ncByNum[n];
         return {
           num: n, crowd: o.crowd, parts: o.parts, rank: o.rank, role: roleOf(n)
         };
@@ -1271,7 +1258,7 @@
       return danCount ? 'tuo' : 'main';
     });
     var specialDetail = specialNums.map(function (n) {
-      var o = sc.list.filter(function (x) { return x.num === n; })[0];
+      var o = scByNum[n];
       return {
         num: n, crowd: o.crowd, parts: o.parts, rank: o.rank,
         role: sDan.indexOf(n) >= 0 ? 'sDan' : (sDanCount ? 'sTuo' : 'special')
@@ -1327,7 +1314,7 @@
       events: nc.events,
       notes: notes,
       attempts: ev.evals(),
-      windowSize: nc.list.length,
+      windowSize: ctx.windowSize,
       latest: all[all.length - 1],
       prevMain: ctx.prevMain,
       sumMu: ctx.sumMu,
