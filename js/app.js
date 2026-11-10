@@ -21,8 +21,6 @@
     sTuoCount: null,     // 特别区（后区）拖码个数，胆码由官方规则固定为 1 个
     halflife: 30,
     seed: null,
-    // 出号策略固定为「避拥挤」（对应 require.md），不再提供手动切换
-    strategy: 'crowd',
     crowdMax: 60,        // 拥挤度上限，超过者不许输出
     hotPool: '',         // 热门号池（网络 + 手工双来源）
     luck: '',            // 运气源（每行一条，可带日期前缀）
@@ -226,18 +224,17 @@
     var seed = state.seed || (state.seed = (Date.now() & 0x7fffffff));
     var kind = state.kind;
     var params = betParams();
-    // 「避拥挤」：单式走逐注抽样，复式 / 胆拖走号码池优化
-    var useCrowd = state.strategy === 'crowd';
-    var key = kind + '|' + state.window + '|' + state.halflife + '|' + state.strategy + '|' +
+    var key = kind + '|' + state.window + '|' + state.halflife + '|' +
       [params.betType, params.dtForm, params.mainSel, params.specialSel,
         params.danCount, params.tuoCount, params.sDanCount, params.sTuoCount,
         params.tickets].join(',') +
       '|' + state.hotPool + '|' + state.events + '|' + state.selfPick +
       '|' + state.luck + '|' + crowdPlanKey() + '|' + state.crowdMax +
-      '|' + ((useCrowd || params.betType === 'single') ? seed : 'det');
+      '|' + seed;
     if (forceNewSeed) delete state.cache[key];
     if (!state.cache[key]) {
-      if (useCrowd && params.betType === 'single') {
+      // 出号统一走「避拥挤」：单式逐注抽样，复式 / 胆拖走号码池优化
+      if (params.betType === 'single') {
         state.cache[key] = LCrowd.generate(kind, {
           window: state.window,
           seed: seed,
@@ -248,7 +245,7 @@
           tiers: crowdPlan(),
           crowdMax: state.crowdMax
         });
-      } else if (useCrowd) {
+      } else {
         state.cache[key] = LCrowd.buildPool(kind, {
           window: state.window,
           seed: seed,
@@ -266,28 +263,6 @@
           sDanCount: params.sDanCount,
           sTuoCount: params.sTuoCount
         });
-      } else {
-        var opt = {
-          window: state.window,
-          halflife: state.halflife,
-          samples: 20000,
-          seed: seed,
-          betType: params.betType
-        };
-        if (params.betType === 'single') {
-          opt.tickets = params.tickets;
-        } else {
-          opt.mainSel = params.mainSel;
-          opt.specialSel = params.specialSel;
-          if (params.betType === 'dantuo') {
-            opt.dtForm = params.dtForm;
-            opt.danCount = params.danCount;
-            opt.tuoCount = params.tuoCount;
-            opt.sDanCount = params.sDanCount;
-            opt.sTuoCount = params.sTuoCount;
-          }
-        }
-        state.cache[key] = LM.recommend(kind, opt);
       }
     }
     return state.cache[key];
@@ -389,7 +364,7 @@
       combos = mainPart * specPart;
     } else {
       // 避拥挤策略下注数由出号分层决定，与"推荐注数"无关
-      combos = (state.strategy === 'crowd') ? Math.max(crowdTotal(), 1) : p.tickets;
+      combos = Math.max(crowdTotal(), 1);
     }
     return { combos: combos, cost: combos * bo.yuanPerBet };
   }
@@ -573,6 +548,7 @@
   var historyPushed = false;   // 是否已压入一条历史记录，决定返回时能否用 history.back()
   var closing = false;         // 防止返回动画期间重复触发 history.back()
   var recTimer = null;
+  var settingsDirty = false;   // 「分析设置」二级页里改过配置，回到一级界面时需刷新摘要
   var dragging = false;
 
   function activePage() { return stack.length ? stack[stack.length - 1] : null; }
@@ -635,6 +611,18 @@
     }
     document.body.classList.toggle('page-pushed', stack.length > 0);
     setPush(stack.length > 0 ? 1 : 0);
+
+    // 回到一级界面：设置页里有改动 → 刷新推荐摘要；
+    // 没改动也顺手同步「推荐记录」计数（记录页里可能删过记录）
+    if (!stack.length && state.tab === 'recommend') {
+      if (settingsDirty) {
+        settingsDirty = false;
+        renderRecommend();
+      } else {
+        var recBtn = $('#btn-rec-list');
+        if (recBtn) recBtn.textContent = '推荐记录（' + recCount() + '）';
+      }
+    }
   }
 
   // 所有"返回"入口都走这里：优先 history.back()，让浏览器历史与页面栈保持一致
@@ -716,26 +704,22 @@
         historyPushed = true;
         if (st.lottoPage === 'draw-history') showHistoryPage({ noHistory: true });
         else if (st.lottoPage === 'rec-list') showRecordsPage({ noHistory: true });
+        else if (st.lottoPage === 'settings') showSettingsPage({ noHistory: true });
         else showResultPage(null, { noHistory: true });
       }
     });
   }
 
-  // 二级页标题：胆拖要区分主区 / 特别区 / 双区
+  // 二级页标题：胆拖要区分主区 / 特别区 / 双区（出号固定为「避拥挤」）
   function recBetLabel(p) {
-    if (state.strategy === 'crowd') {
-      if (p.betType === 'single') return '避拥挤';
-      return '避拥挤 · ' + (p.betType === 'dantuo'
-        ? LM.dtFormLabel(state.kind, p.dtForm) : betLabel(p.betType));
-    }
-    if (p.betType === 'dantuo') return LM.dtFormLabel(state.kind, p.dtForm);
-    return betLabel(p.betType);
+    if (p.betType === 'single') return '避拥挤';
+    return '避拥挤 · ' + (p.betType === 'dantuo'
+      ? LM.dtFormLabel(state.kind, p.dtForm) : betLabel(p.betType));
   }
 
   /* ---------- 二级页：推荐号码 ---------- */
   function resultPageHtml(c, p, pv) {
-    // 换一批：单式与避拥挤（单式 / 号码池）都由种子驱动，可复现
-    var canRegen = state.betType === 'single' || state.strategy === 'crowd';
+    // 换一批：单式与号码池都由种子驱动，可复现
     return '<header class="page-nav">' +
       '<button class="back-btn" id="btn-back" aria-label="返回设置">‹</button>' +
       '<div class="page-nav-text">' +
@@ -746,9 +730,9 @@
       '</header>' +
       // 操作栏常驻顶部：号码再多也不用滚到底部去找"换一批"
       '<div class="page-actions">' +
-      '<div class="gen-actions' + (canRegen ? ' two' : '') + '">' +
+      '<div class="gen-actions two">' +
       '<button class="btn-ghost" id="btn-back-2">返回修改设置</button>' +
-      (canRegen ? '<button class="btn-primary" id="btn-regenerate">换一批号码</button>' : '') +
+      '<button class="btn-primary" id="btn-regenerate">换一批号码</button>' +
       '</div>' +
       '</div>' +
       '<div class="page-scroll">' +
@@ -763,15 +747,18 @@
 
     if (!openPage('rec-result', resultPageHtml(c, p, pv), opts)) return;
 
-    $('#btn-back').addEventListener('click', closePage);
-    $('#btn-back-2').addEventListener('click', closePage);
-    var rg = $('#btn-regenerate');
+    // 绑定一律收在页面根节点内：二级页可能叠开，
+    // 全局查 #btn-back 会抓到底下那层页面的按钮
+    var el = $('#page-rec-result');
+    $('#btn-back', el).addEventListener('click', closePage);
+    $('#btn-back-2', el).addEventListener('click', closePage);
+    var rg = $('#btn-regenerate', el);
     if (rg) {
       rg.addEventListener('click', function () {
         state.seed = (Date.now() & 0x7fffffff);
         renderRecommendTickets(true);
         // 操作栏钉在顶部，换号后把列表拉回开头，方便从头看新号码
-        var sc = $('.page-scroll');
+        var sc = $('.page-scroll', el);
         if (sc && sc.scrollTo) {
           try { sc.scrollTo({ top: 0, behavior: 'smooth' }); }
           catch (e) { sc.scrollTop = 0; }
@@ -1340,10 +1327,10 @@
   function showHistoryPage(opts) {
     var c = LC.cfg(state.kind);
     if (!openPage('draw-history', historyPageHtml(c), opts)) return;
+    var el = $('#page-draw-history');
+    $('#btn-back', el).addEventListener('click', closePage);
 
-    $('#btn-back').addEventListener('click', closePage);
-
-    var input = $('#hist-input');
+    var input = $('#hist-input', el);
     var timer = null;
     input.addEventListener('input', function () {
       if (timer) clearTimeout(timer);
@@ -1362,9 +1349,101 @@
     renderHistList(true);
   }
 
-  /* ---------- 一级界面：分析设置 ---------- */
+  /* ============================================================
+   * 一级界面：推荐 = 设置摘要卡 + 生成入口
+   * 完整配置在「分析设置」二级页（openPage 滑入，右滑/返回键收起）
+   * ========================================================== */
+
+  function windowLabel(v) {
+    for (var i = 0; i < WINDOWS.length; i++) {
+      if (WINDOWS[i].v === v) return WINDOWS[i].label;
+    }
+    return '全部';
+  }
+
+  // 摘要卡数据：全部读自 state，设置页里任何改动返回后都会如实反映
+  function settingsSummaryLines() {
+    var c = LC.cfg(state.kind);
+    var p = betParams();
+    var lines = [];
+    if (p.betType === 'single') {
+      lines.push({ k: '投注方式', v: '单式 · 推荐 ' + p.tickets + ' 注' });
+      lines.push({ k: '出号分层', v: tierPlanText(crowdPlan()) });
+    } else if (p.betType === 'compound') {
+      lines.push({ k: '投注方式', v: '复式 · ' + c.mainLabel + ' ' + p.mainSel + ' 个 + ' +
+        c.specialLabel + ' ' + p.specialSel + ' 个' });
+    } else {
+      var parts = [];
+      if (p.dtForm !== 'special') parts.push(c.mainLabel + ' ' + p.danCount + ' 胆 ' + p.tuoCount + ' 拖');
+      if (p.dtForm !== 'main') parts.push(c.specialLabel + ' ' + p.sDanCount + ' 胆 ' + p.sTuoCount + ' 拖');
+      if (p.dtForm === 'main') parts.push(c.specialLabel + '选 ' + p.specialSel + ' 个');
+      lines.push({ k: '投注方式', v: LM.dtFormLabel(state.kind, p.dtForm) + ' · ' + parts.join(' + ') });
+    }
+    lines.push({ k: '拥挤度上限', v: '≤ ' + state.crowdMax });
+    lines.push({ k: '样本窗口', v: windowLabel(state.window) });
+    var src = [];
+    if (String(state.hotPool || '').trim()) src.push('热门号池');
+    if (String(state.events || '').trim()) src.push('实时事件');
+    if (String(state.selfPick || '').trim()) src.push('历史自买');
+    if (String(state.luck || '').trim()) src.push('运气源');
+    lines.push({ k: '环境与欧气', v: src.length ? '已填 ' + src.join('、') : '未填写' });
+    return lines;
+  }
+
+  function settingsSummaryHtml() {
+    var c = LC.cfg(state.kind);
+    var rows = settingsSummaryLines().map(function (r) {
+      return '<div class="sum-row"><span>' + r.k + '</span><b>' + esc(r.v) + '</b></div>';
+    }).join('');
+    return '<div class="card sum-card" id="sum-card" role="button" aria-label="打开分析设置">' +
+      '<div class="card-head"><h3>分析设置 · ' + esc(c.name) + '</h3>' +
+      '<span class="head-actions"><button class="copy-btn" id="btn-open-settings">调整 ›</button></span>' +
+      '</div>' + rows + '</div>';
+  }
+
   function renderRecommend() {
     var panel = $('#panel-recommend');
+    if (!panel) return;
+    var c = LC.cfg(state.kind);
+    var pv = betPreview(c, betOpts(), betParams());
+
+    var hint = '避拥挤出号不做任何预测：开奖是独立随机事件，每注中奖概率恒等。' +
+      (state.betType === 'single'
+        ? '它只逐层筛掉大众扎堆的号码与形态，降低中奖后被分摊的人数。'
+        : '复式 / 胆拖无法逐注剔除，改为优化号码池，让展开后的平均拥挤度最低。') +
+      '全部 ' + LC.draws(state.kind).length +
+      ' 期历史用于 P0 历史同源与形态统计口径。';
+
+    panel.innerHTML = settingsSummaryHtml() +
+      '<div class="gen-bar">' +
+      '<div class="gen-sum">本次将生成 <b>' + pv.combos.toLocaleString() + '</b> 注，' +
+      '共 <b>' + pv.cost.toLocaleString() + '</b> 元</div>' +
+      '<div class="gen-actions">' +
+      '<button class="btn-primary" id="btn-generate">生成推荐号码</button>' +
+      '<button class="btn-ghost" id="btn-rec-list">推荐记录（' + recCount() + '）</button>' +
+      '</div>' +
+      '<p class="hint">' + hint + '</p>' +
+      '</div>';
+
+    // 摘要卡（含卡内「调整 ›」按钮）整体可点，进设置二级页
+    var sumCard = $('#sum-card');
+    if (sumCard) sumCard.addEventListener('click', function () { showSettingsPage(); });
+
+    var genBtn = $('#btn-generate');
+    if (genBtn) {
+      genBtn.addEventListener('click', function () {
+        state.seed = (Date.now() & 0x7fffffff);
+        showResultPage();
+      });
+    }
+
+    var recBtn = $('#btn-rec-list');
+    if (recBtn) recBtn.addEventListener('click', function () { showRecordsPage(); });
+  }
+
+  /* ---------- 二级页：分析设置 ---------- */
+
+  function settingsBodyHtml() {
     var c = LC.cfg(state.kind);
     var bo = betOpts();
     var p = betParams();
@@ -1379,72 +1458,61 @@
         '" data-bet="' + b.v + '">' + b.label + '</button>';
     }).join('');
 
-    var pv = betPreview(c, bo, p);
-
-    var setupBody =
+    var body = '<div class="card">' +
       '<div class="field"><label>分析样本窗口</label><div class="chips">' + winChips + '</div></div>';
 
     // 投注方式可切换：单式走逐注抽样，复式 / 胆拖走号码池优化
-    setupBody +=
+    body +=
       '<div class="field"><label>投注方式</label><div class="chips">' + betChips + '</div>' +
       betNote(c, bo, p) + '</div>';
 
     if (p.betType === 'single') {
-      setupBody +=
-        '<div class="sub-title">注数与出号分层</div>' + crowdTierFields(c, bo) +
+      body += '<div class="sub-title">注数与出号分层</div>' + crowdTierFields(c, bo) +
         crowdThresholdField();
     } else {
-      setupBody += betParamFields(c, bo, p) + crowdThresholdField() + crowdPoolHint();
+      body += betParamFields(c, bo, p) + crowdThresholdField() + crowdPoolHint();
     }
 
-    setupBody += '<div class="sub-title">环境（E）与欧气（L）</div>' + crowdSourceFields();
+    body += '<div class="sub-title">环境（E）与欧气（L）</div>' + crowdSourceFields();
+    return body + '</div>';
+  }
 
-    var hint = '避拥挤出号不做任何预测：开奖是独立随机事件，每注中奖概率恒等。' +
-      (state.betType === 'single'
-        ? '它只逐层筛掉大众扎堆的号码与形态，降低中奖后被分摊的人数。'
-        : '复式 / 胆拖无法逐注剔除，改为优化号码池，让展开后的平均拥挤度最低。') +
-      '全部 ' + LC.draws(state.kind).length +
-      ' 期历史用于 P0 历史同源与形态统计口径。';
+  function settingsPageHtml() {
+    var c = LC.cfg(state.kind);
+    return '<header class="page-nav">' +
+      '<button class="back-btn" id="btn-back" aria-label="返回">‹</button>' +
+      '<div class="page-nav-text"><b>分析设置</b><span>' + esc(c.name) +
+      ' · 改动即时生效，返回后首页同步</span></div>' +
+      '</header>' +
+      '<div class="page-scroll"><div id="settings-body">' + settingsBodyHtml() + '</div></div>';
+  }
 
-    var html =
-      '<div class="card">' +
-      '<div class="card-head"><h3>分析设置</h3></div>' +
-      setupBody +
-      '</div>' +
-      '<div class="gen-bar">' +
-      '<div class="gen-sum">本次将生成 <b>' + pv.combos.toLocaleString() + '</b> 注，' +
-      '共 <b>' + pv.cost.toLocaleString() + '</b> 元</div>' +
-      '<button class="btn-primary" id="btn-generate">生成推荐号码</button>' +
-      '<button class="btn-ghost" id="btn-rec-list">推荐记录（' + recCount() + '）</button>' +
-      '<p class="hint">' + hint + '</p>' +
-      '</div>';
+  function showSettingsPage(opts) {
+    if (!openPage('settings', settingsPageHtml(), opts)) return;
+    var el = $('#page-settings');
+    var back = $('#btn-back', el);
+    if (back) back.addEventListener('click', closePage);
+    bindSettingsFields(el);
+  }
 
-    panel.innerHTML = html;
-
-    var genBtn = $('#btn-generate');
-    if (genBtn) {
-      genBtn.addEventListener('click', function () {
-        state.seed = (Date.now() & 0x7fffffff);
-        showResultPage();
-      });
+  // 设置页字段绑定：容器是二级页根节点；
+  // 结构型改动（换投注方式 / 胆拖形式 / 胆码数等）重建 #settings-body 后重新绑定
+  function bindSettingsFields(root) {
+    function rerender() {
+      var body = $('#settings-body', root);
+      if (body) body.innerHTML = settingsBodyHtml();
+      bindSettingsFields(root);
     }
+    // 任何改动先标记主面板摘要为「脏」，返回一级界面时统一刷新
+    function touch() { settingsDirty = true; }
 
-    var recBtn = $('#btn-rec-list');
-    if (recBtn) recBtn.addEventListener('click', function () { showRecordsPage(); });
-
-    function rerenderSettings() {
-      renderRecommend();
-      if (state.tab === 'stats') renderStats();
-      if (state.tab === 'tests') renderTests();
-    }
-
-    $$('.chips [data-window]', panel).forEach(function (b) {
+    $$('.chips [data-window]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         state.window = Number(b.dataset.window);
-        rerenderSettings();
+        touch(); rerender();
       });
     });
-    $$('.chips [data-bet]', panel).forEach(function (b) {
+    $$('.chips [data-bet]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         state.betType = b.dataset.bet;
         state.mainSel = null;
@@ -1452,209 +1520,118 @@
         state.danCount = null;
         state.tuoCount = null;
         state.sTuoCount = null;
-        renderRecommend();
+        touch(); rerender();
       });
     });
-    $$('.chips [data-crowdmax]', panel).forEach(function (b) {
+    $$('.chips [data-crowdmax]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         state.crowdMax = Number(b.dataset.crowdmax);
         state.seed = (Date.now() & 0x7fffffff);
-        renderRecommend();
+        touch(); rerender();
       });
     });
     // 文本框在输入过程中只同步状态、不重建 DOM，避免丢焦点
-    var hpInput = $('#hotpool-input', panel);
+    var hpInput = $('#hotpool-input', root);
     if (hpInput) {
       hpInput.addEventListener('input', function () {
         state.hotPool = hpInput.value;
         state.seed = (Date.now() & 0x7fffffff);
+        touch();
       });
     }
-    var luckInput = $('#luck-input', panel);
+    var luckInput = $('#luck-input', root);
     if (luckInput) {
       luckInput.addEventListener('input', function () {
         state.luck = luckInput.value;
         state.seed = (Date.now() & 0x7fffffff);
+        touch();
       });
     }
-    var evtInput = $('#events-input', panel);
+    var evtInput = $('#events-input', root);
     if (evtInput) {
       evtInput.addEventListener('input', function () {
         state.events = evtInput.value;
         state.seed = (Date.now() & 0x7fffffff);
+        touch();
       });
     }
-    var selfInput = $('#selfpick-input', panel);
+    var selfInput = $('#selfpick-input', root);
     if (selfInput) {
       selfInput.addEventListener('input', function () {
         state.selfPick = selfInput.value;
         state.seed = (Date.now() & 0x7fffffff);
+        touch();
       });
     }
-    $$('.chips [data-msel]', panel).forEach(function (b) {
+    $$('.chips [data-msel]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         state.mainSel = Number(b.dataset.msel);
-        renderRecommend();
+        touch(); rerender();
       });
     });
-    $$('.chips [data-ssel]', panel).forEach(function (b) {
+    $$('.chips [data-ssel]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         state.specialSel = Number(b.dataset.ssel);
-        renderRecommend();
+        touch(); rerender();
       });
     });
-    $$('.chips [data-dan]', panel).forEach(function (b) {
+    $$('.chips [data-dan]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         state.danCount = Number(b.dataset.dan);
         state.tuoCount = null;
-        renderRecommend();
+        touch(); rerender();
       });
     });
-    $$('.chips [data-tuo]', panel).forEach(function (b) {
+    $$('.chips [data-tuo]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         state.tuoCount = Number(b.dataset.tuo);
-        renderRecommend();
+        touch(); rerender();
       });
     });
-    $$('.chips [data-dtform]', panel).forEach(function (b) {
+    $$('.chips [data-dtform]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         state.dtForm = b.dataset.dtform;
         state.danCount = null;
         state.tuoCount = null;
         state.sTuoCount = null;
-        renderRecommend();
+        touch(); rerender();
       });
     });
-    $$('.chips [data-stuo]', panel).forEach(function (b) {
+    $$('.chips [data-stuo]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         state.sTuoCount = Number(b.dataset.stuo);
-        renderRecommend();
+        touch(); rerender();
       });
     });
-    $$('.chips [data-tickets]', panel).forEach(function (b) {
+    $$('.chips [data-tickets]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         state.tickets = Number(b.dataset.tickets);
         state.seed = (Date.now() & 0x7fffffff);
-        renderRecommend();
+        touch(); rerender();
       });
     });
-    var ticketInput = $('#tickets-input', panel);
+    var ticketInput = $('#tickets-input', root);
     if (ticketInput) {
       // 输入过程中不重建 DOM（否则会丢焦点、丢光标），只同步状态与预览
       ticketInput.addEventListener('input', function () {
         var raw = String(ticketInput.value).trim();
         var n = Number(raw);
         var valid = raw !== '' && isFinite(n) && n >= TICKET_MIN && n <= TICKET_MAX;
-        markTicketsInvalid(panel, !valid);
+        markTicketsInvalid(root, !valid);
         if (!valid) return;                       // 越界先只标红，失焦时再拉回
         state.tickets = Math.round(n);
-        syncTicketPicks(panel, state.tickets);
-        updateBetPreview(panel);
+        syncTicketPicks(root, state.tickets);
+        updateBetPreview(root);
+        touch();
       });
-      ticketInput.addEventListener('blur', function () { normalizeTickets(panel, ticketInput); });
+      ticketInput.addEventListener('blur', function () {
+        normalizeTickets(root, ticketInput);
+        touch();
+      });
       ticketInput.addEventListener('keydown', function (e) {
         if (e.key === 'Enter') { e.preventDefault(); ticketInput.blur(); }
       });
     }
-  }
-
-  function factorBars(o) {
-    return Object.keys(FACTOR_META).map(function (k) {
-      var z = (o.factors && o.factors[k]) || 0;
-      var w = Math.min(Math.abs(z) / 3, 1) * 50;
-      var neg = z < 0;
-      return '<div class="fbar-row">' +
-        '<span class="fbar-name">' + FACTOR_META[k].name + '</span>' +
-        '<span class="fbar-track"><i style="background:' + FACTOR_META[k].color +
-        ';width:' + w.toFixed(1) + '%;' + (neg ? 'margin-left:' + (50 - w).toFixed(1) + '%' : 'margin-left:50%') + '"></i></span>' +
-        '<span class="fbar-val">' + (z >= 0 ? '+' : '') + z.toFixed(2) + '</span>' +
-        '</div>';
-    }).join('');
-  }
-
-  // 复式 / 胆拖：号码分组卡片（含注数、金额、展开说明）
-  function betCardHtml(rec) {
-    var b = rec.bet, c = rec.config;
-    var isDan = b.type === 'dantuo';
-    var form = isDan ? (b.dtForm || 'main') : null;
-    var specIsDan = form === 'special' || form === 'both';
-
-    function group(label, nums, cls) {
-      return '<div class="bet-group">' +
-        '<span class="bet-group-label">' + label + '</span>' +
-        '<span class="balls">' + nums.map(function (n) {
-          return '<i class="ball ' + cls + '">' + pad2(n) + '</i>';
-        }).join('') + '</span></div>';
-    }
-
-    var mainHtml;
-    if (form === 'special') mainHtml = group(c.mainLabel, b.main, 'ball-main');
-    else if (isDan) mainHtml = group('胆码', b.dan, 'ball-main') + group('拖码', b.tuo, 'ball-drag');
-    else mainHtml = group(c.mainLabel, b.main, 'ball-main');
-
-    var specHtml = specIsDan
-      ? group(c.specialLabel + '胆码', b.sDan, 'ball-special') +
-        group(c.specialLabel + '拖码', b.sTuo, 'ball-special-drag')
-      : group(c.specialLabel, b.special, 'ball-special');
-
-    var tag;
-    if (form === 'special') {
-      tag = c.mainLabel + ' ' + b.mainSel + ' 个 + ' + b.sDanCount + ' 个' + c.specialLabel +
-        '胆 + ' + b.sTuoCount + ' 拖';
-    } else if (form === 'both') {
-      tag = b.danCount + ' 胆 + ' + b.tuoCount + ' 拖 + ' + b.sDanCount + ' 个' + c.specialLabel +
-        '胆 + ' + b.sTuoCount + ' 拖';
-    } else if (isDan) {
-      tag = b.danCount + ' 胆 + ' + b.tuoCount + ' 拖 + ' + b.specialSel + ' 个' + c.specialLabel;
-    } else {
-      tag = b.mainSel + ' 个' + c.mainLabel + ' + ' + b.specialSel + ' 个' + c.specialLabel;
-    }
-
-    var detail = b.main.map(function (n) {
-      var o = rec.poolScores.filter(function (x) { return x.num === n; })[0];
-      var isDanNum = isDan && form !== 'special' && b.dan.indexOf(n) >= 0;
-      var cls = isDanNum ? 'ball-main' : (isDan && form !== 'special' ? 'ball-drag' : 'ball-main');
-      var name = isDan && form !== 'special' ? (isDanNum ? '胆码' : '拖码') : c.mainLabel;
-      return '<div class="num-detail">' +
-        '<div class="num-detail-head"><i class="ball ' + cls + '">' +
-        pad2(n) + '</i><span>' + name +
-        ' · 评分 ' + o.score.toFixed(2) + ' · 排名第 ' + o.rank + '</span></div>' +
-        factorBars(o) + '</div>';
-    }).join('');
-
-    var specDetail = b.special.map(function (n) {
-      var o = rec.specialScores.filter(function (x) { return x.num === n; })[0];
-      var isSDan = specIsDan && b.sDan.indexOf(n) >= 0;
-      var name = specIsDan ? (isSDan ? '胆码' : '拖码') : '';
-      return '<div class="num-detail">' +
-        '<div class="num-detail-head"><i class="ball ' + (isSDan ? 'ball-special' : 'ball-special-drag') +
-        '">' + pad2(n) + '</i>' +
-        '<span>' + c.specialLabel + (name ? '（' + name + '）' : '') +
-        ' · 评分 ' + o.score.toFixed(2) + ' · 排名第 ' + o.rank +
-        '</span></div>' + factorBars(o) + '</div>';
-    }).join('');
-
-    return '<div class="ticket bet-ticket">' +
-      '<div class="ticket-head">' +
-      '<span class="ticket-no">' + b.label + '投注 · ' + tag + '</span>' +
-      '<span class="ticket-score">' + b.combos.toLocaleString() + ' 注 · ' +
-      b.cost.toLocaleString() + ' 元</span>' +
-      '</div>' +
-      '<div class="bet-groups">' + mainHtml + specHtml + '</div>' +
-      '<div class="bet-formula">展开：' + b.formula + ' = ' + b.combos.toLocaleString() + ' 注' +
-      (b.structureAvg == null ? '' :
-        ' · 组合结构典型度均值 ' + (b.structureAvg * 100).toFixed(0) + '%') + '</div>' +
-      '<button class="link-btn" data-toggle="0">查看每个号码的依据 ▾</button>' +
-      '<div class="ticket-detail" id="td-0">' + detail + specDetail + '</div>' +
-      '</div>';
-  }
-
-  function recSummary(rec) {
-    if (rec.bet && rec.bet.type !== 'single') {
-      return '号码按综合评分由高到低选取，属于确定性输出，不涉及随机采样。';
-    }
-    return '从 ' + rec.candidateCount.toLocaleString() +
-      ' 个经结构筛选的候选组合中排序输出 · 随机种子 ' + rec.seed;
   }
 
   /* ---------- 结果页：避拥挤出号 ---------- */
@@ -2157,125 +2134,9 @@
     if (!box) return;
     var rec = buildRecommendation(forceNewSeed);
     saveRecommendRecord(rec);      // 一次推荐 = 一条记录
-    var c = rec.config;
-    var ticketsHtml;
-
-    if (rec.strategy === 'crowd') {
-      if (rec.mode === 'pool') renderCrowdPoolResult(box, rec);
-      else renderCrowdResult(box, rec);
-      return;
-    }
-
-    if (rec.bet && rec.bet.type !== 'single') {
-      ticketsHtml = betCardHtml(rec);
-    } else {
-      ticketsHtml = rec.tickets.map(function (t, i) {
-        var f = t.features;
-        var detail = t.mainDetail.map(function (d) {
-          return '<div class="num-detail">' +
-            '<div class="num-detail-head"><i class="ball ball-main">' + pad2(d.num) + '</i>' +
-            '<span>评分 ' + d.score.toFixed(2) + ' · 排名第 ' + d.rank + '</span></div>' +
-            factorBars(d) + '</div>';
-        }).join('');
-
-        return '<div class="ticket">' +
-          '<div class="ticket-head">' +
-          '<span class="ticket-no">方案 ' + (i + 1) + '</span>' +
-          '<span class="ticket-score">模型评分 ' + (t.total * 100).toFixed(1) + '</span>' +
-          '</div>' +
-          '<div class="ticket-balls">' + ballsHtml(t.main, 'main') +
-          '<span class="ball-sep">+</span>' + ballsHtml(t.special, 'special') + '</div>' +
-          '<div class="ticket-metrics">' +
-          '<span>和值 <b>' + f.sum + '</b></span>' +
-          '<span>跨度 <b>' + f.span + '</b></span>' +
-          '<span>奇偶 <b>' + f.odd + ':' + (c.mainCount - f.odd) + '</b></span>' +
-          '<span>大小 <b>' + f.big + ':' + (c.mainCount - f.big) + '</b></span>' +
-          '<span>区间 <b>' + f.zone + '</b></span>' +
-          '<span>连号 <b>' + f.consecutive + '</b></span>' +
-          '<span>重号 <b>' + f.repeat + '</b></span>' +
-          '</div>' +
-          '<div class="ticket-bar">' +
-          '<span>结构典型度</span><span class="progress"><i style="width:' +
-          (t.structureScore * 100).toFixed(0) + '%"></i></span>' +
-          '<span class="muted">' + (t.structureScore * 100).toFixed(0) + '%</span>' +
-          '</div>' +
-          '<button class="link-btn" data-toggle="' + i + '">查看号码依据 ▾</button>' +
-          '<div class="ticket-detail" id="td-' + i + '">' + detail + '</div>' +
-          '</div>';
-      }).join('');
-    }
-
-    // 号码评分榜
-    var poolRows = rec.poolScores.slice(0, 16).map(function (o) {
-      return '<div class="pool-row">' +
-        '<i class="ball ball-main sm">' + pad2(o.num) + '</i>' +
-        '<span class="pool-score">' + o.score.toFixed(2) + '</span>' +
-        '<span class="pool-tag">' + rankTag(o.rank) + '</span>' +
-        '</div>';
-    }).join('');
-
-    var specRows = rec.specialScores.map(function (o) {
-      return '<div class="pool-row">' +
-        '<i class="ball ball-special sm">' + pad2(o.num) + '</i>' +
-        '<span class="pool-score">' + o.score.toFixed(2) + '</span>' +
-        '<span class="pool-tag">' + rankTag(o.rank) + '</span>' +
-        '</div>';
-    }).join('');
-
-    var weightsText = Object.keys(FACTOR_META).map(function (k) {
-      return '<span class="weight-item"><i style="background:' + FACTOR_META[k].color + '"></i>' +
-        FACTOR_META[k].name + ' <b>' + ((rec.weights[k] || 0) * 100).toFixed(0) + '%</b></span>';
-    }).join('');
-
-    box.innerHTML =
-      '<div class="card">' +
-      '<div class="card-head"><h3>' + (rec.bet ? rec.bet.label : '') + '推荐方案</h3>' +
-      '<span class="badge" id="weight-badge">权重自适应</span></div>' +
-      '<p class="muted small">' + recSummary(rec) + '</p>' +
-      ticketsHtml +
-      '<div class="factor-legend">' + Object.keys(FACTOR_META).map(function (k) {
-        return '<div class="legend-row"><i style="background:' + FACTOR_META[k].color + '"></i>' +
-          '<b>' + FACTOR_META[k].name + '</b><span>' + FACTOR_META[k].desc + '</span></div>';
-      }).join('') + '</div>' +
-      '</div>' +
-      '<div class="card">' +
-      '<div class="card-head"><h3>号码评分排行</h3></div>' +
-      '<p class="muted small">综合分 = 各因子 z 值的加权和（已标准化，0 表示处于平均水平）</p>' +
-      '<div class="subtabs">' +
-      '<button class="subtab active" data-sub="main">' + rec.config.mainLabel + '评分</button>' +
-      '<button class="subtab" data-sub="special">' + rec.config.specialLabel + '评分</button>' +
-      '</div>' +
-      '<div class="pool-grid" id="pool-main">' + poolRows + '</div>' +
-      '<div class="pool-grid hidden" id="pool-special">' + specRows + '</div>' +
-      '</div>' +
-      '<div class="card">' +
-      '<div class="card-head"><h3>当前生效权重</h3></div>' +
-      '<div class="weight-list">' + weightsText + '</div>' +
-      '<p class="hint">权重由滚动回测自动学习：在 "回测验证" 中可以看到各因子的实际表现。' +
-      '若某因子在历史上没有超出随机的表现，其权重会自动被压低。</p>' +
-      '</div>';
-
-    $$('.link-btn', box).forEach(function (b) {
-      b.addEventListener('click', function () {
-        var d = $('#td-' + b.dataset.toggle, box);
-        var open = d.classList.toggle('open');
-        b.textContent = open ? '收起来源依据 ▴' : '查看号码依据 ▾';
-      });
-    });
-    $$('.subtab', box).forEach(function (b) {
-      b.addEventListener('click', function () {
-        $$('.subtab', box).forEach(function (x) { x.classList.remove('active'); });
-        b.classList.add('active');
-        $('#pool-main', box).classList.toggle('hidden', b.dataset.sub !== 'main');
-        $('#pool-special', box).classList.toggle('hidden', b.dataset.sub !== 'special');
-      });
-    });
-  }
-
-  function rankTag(rank) {
-    if (rank <= 5) return '强烈关注';
-    if (rank <= 10) return '值得关注';
-    return '一般';
+    // 出号策略固定为「避拥挤」：单式与号码池两种形态都走 crowd 渲染
+    if (rec.mode === 'pool') renderCrowdPoolResult(box, rec);
+    else renderCrowdResult(box, rec);
   }
 
   /* ============================================================
@@ -2768,6 +2629,10 @@
       liveBusy = false;                    // 这一轮结束，允许再次核对 / 重试
       var fails = results.filter(function (r) { return !r.ok; });
       var text = progressText();
+      // 把底层失败原因摊开写（远端代理返回的 error 也属外部数据，进 innerHTML 前先转义）
+      var why = fails.map(function (r) {
+        return esc(r.error || '未知错误') + (r.proxyError ? '（' + esc(r.proxyError) + '）' : '');
+      }).join('；');
       if (!fails.length) {
         liveNote('开奖核对完成：' + text, 'ok', 12000);
         return;
@@ -2794,10 +2659,6 @@
       // 有玩法没拿到：提示常驻（不自动收起），点"重试"只重试失败的玩法
       var fileMode = window.LCLive.fileMode ||
         (typeof location !== 'undefined' && location.protocol === 'file:');
-      // 把底层原因摊开写（如"页面服务器没有 /api 代理（HTTP 404）"），避免只看到"未取到"
-      var why = fails.map(function (r) {
-        return (r.error || '未知错误') + (r.proxyError ? '（' + r.proxyError + '）' : '');
-      }).join('；');
       // 按失败性质给不同指引：没有代理 / file:// / 跨域被拦，处理办法并不一样
       var noProxy = fails.some(function (r) { return r.errorKind === 'no-proxy'; });
       var host = (typeof location !== 'undefined' && location.hostname) || '';
@@ -2859,7 +2720,8 @@
   function switchKind(kind) {
     state.kind = kind;
     state.seed = (Date.now() & 0x7fffffff);
-    // 投注参数回到该玩法的默认值
+    // 投注参数回到该玩法的默认值（含投注方式：大乐透配的胆拖不应带去双色球）
+    state.betType = 'single';
     state.mainSel = null;
     state.specialSel = null;
     state.danCount = null;

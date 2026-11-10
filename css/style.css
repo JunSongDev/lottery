@@ -68,7 +68,10 @@ body.page-pushed .app { will-change: transform; }
 
 .hero { padding: 22px 0 6px; }
 
-.hero-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.hero-title {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap;   /* 窄屏放不下时徽标整枚换行，标题与副标题保持单行 */
+}
 
 .hero h1 {
   font-size: 22px;
@@ -307,6 +310,18 @@ body.page-pushed .app { will-change: transform; }
 .sub-title { font-size: 12.5px; color: var(--text-2); font-weight: 600; margin: 16px 0 8px; }
 .sub-title:first-child { margin-top: 0; }
 
+/* 设置摘要卡：主页面只显示当前配置一览，整卡可点进「分析设置」二级页 */
+.sum-card { cursor: pointer; }
+.sum-card:active { background: var(--card-2); }
+.sum-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  padding: 7px 0; font-size: 12px;
+  border-bottom: 1px dashed rgba(255, 255, 255, .06);
+}
+.sum-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.sum-row span { color: var(--text-3); flex: none; }
+.sum-row b { color: #dbe4ff; font-weight: 600; text-align: right; }
+
 .field { margin-bottom: 14px; }
 .field > label { display: block; font-size: 12px; color: var(--text-3); margin-bottom: 8px; }
 
@@ -472,6 +487,8 @@ body.page-dragging .page-view { transition: none; }
 .gen-actions.two { grid-template-columns: 1fr 1.15fr; }
 .gen-actions .btn-primary { margin-top: 0; }
 .gen-actions .btn-ghost { margin-top: 0; }
+/* gen-bar 里已有 gen-sum 的下边距，压缩 gen-actions 的上边距保持原节奏 */
+.gen-bar .gen-actions { margin-top: 6px; }
 
 @keyframes lc-fade-up {
   from { opacity: 0; transform: translateY(8px); }
