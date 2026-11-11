@@ -301,14 +301,25 @@
     return step();
   }
 
+  // 同源 /api 代理只有本地 serve.py 会提供（顶部链路①）。
+  // 公网静态托管（Pages / OSS / CDN）上 /api 必然 404 或回落成 HTML，
+  // 直接跳过：省一次注定失败的请求，控制台也不会再挂一条红 404。
+  function localProxyUsable() {
+    try {
+      var host = (root.location && root.location.hostname) || '';
+      return !host || /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)$/.test(host);
+    } catch (e) { return true; }
+  }
+
   // 取数：同源代理 → 远端代理 → 直连 fetch →（可选）JSONP
   function pull(kind, src) {
     var base = remoteBase();
+    var local = localProxyUsable();
     var noProxy = null;                 // 记住"代理根本不可用"这个更根本的原因
     // 配了远端代理就先试它：静态托管上同源 /api 必然是 404，先试只是白等一次
     var queue = [];
     if (base) queue.push(function () { return proxyRows(base + '/' + kind, true); });
-    queue.push(function () { return proxyRows(src.proxy, false); });
+    if (local) queue.push(function () { return proxyRows(src.proxy, false); });
     queue.push(function () {
       return getJson(src.url(), TIMEOUT).then(function (json) {
         return { json: json, via: 'direct' };
@@ -326,12 +337,13 @@
     return firstOf(queue, function (err) {
       if (!err) return;
       if (err.noProxy) noProxy = err;
-      // 直连被浏览器拦 + 前面根本没有可用代理 = 纯环境问题，
-      // 重试不会有不同结果，提示条才能给出准确指引而不是只说"请求失败"
-      if (err.cors && noProxy) {
+      // 直连被浏览器拦 + 前面根本没有可用代理（公网静态托管：/api 不存在、
+      // 未配远端代理；或远端代理也取不到）= 纯环境问题，重试不会有不同结果，
+      // 提示条才能给出准确指引而不是只说"请求失败"
+      if (err.cors && (noProxy || !local)) {
         err.noProxy = true;
         err.fatal = true;
-        err.proxyError = noProxy.message;
+        if (noProxy) err.proxyError = noProxy.message;
       }
     });
   }
