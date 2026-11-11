@@ -72,8 +72,10 @@
      自检：浏览器直接访问 https://<域名>/ 应返回 {"ok":true,...}。
      修改本文件后，记得在 OSS / CDN 上刷新 index.html 的缓存。
      临时换代理可以不改文件，直接在网址后加参数：index.html?proxy=https%3A%2F%2F<域名> -->
-<!-- 云函数已删除，不再主动核对最新开奖；数据更新走 GitHub Actions 定时抓取（.github/workflows/update-data.yml）。
-     本地开发仍可用 serve.py 的同源 /api 代理自动核对。 -->
+<!-- 云函数已删除，当前默认不主动核对最新开奖；数据更新走 GitHub Actions 定时抓取（.github/workflows/update-data.yml）。
+     本地开发仍可用 serve.py 的同源 /api 代理自动核对。
+     如需恢复"每次打开实时核对"：部署 cloudflare/worker.js（Cloudflare Workers，免费、无需绑卡、
+     无需备案，部署与自检步骤见 cloudflare/README.md），然后打开下面这行并填入你的地址。 -->
 <!-- <script>window.LIVE_PROXY = 'https://lottery-proxy-utlmmbaooz.cn-shanghai.fcapp.run';</script> -->
 <script src="js/live.js"></script>
 <script src="js/charts.js"></script>
