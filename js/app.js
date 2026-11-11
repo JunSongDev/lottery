@@ -2542,7 +2542,7 @@
     if (!html) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
     box.className = 'live-note' + (cls ? ' ' + cls : '');
-    box.innerHTML = '<i class="dot"></i>' + html;
+    box.innerHTML = '<i class="dot"></i><span class="live-text">' + html + '</span>';
     if (hideAfter) {
       noteTimer = setTimeout(function () {
         box.classList.add('fading');

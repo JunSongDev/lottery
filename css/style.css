@@ -165,11 +165,12 @@ body.page-pushed .app { will-change: transform; }
 
 /* 首页加载完成后自动核对最新开奖的状态提示（短暂显示后自动隐藏） */
 .live-note {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: flex-start; gap: 6px;
   margin: 10px 2px 0;
   font-size: 11.5px; color: var(--text-3);
   transition: opacity .3s ease;
 }
+.live-note .live-text { flex: 1; min-width: 0; line-height: 1.55; }
 .live-note b { font-weight: 700; }
 .live-note.syncing { color: var(--text-2); }
 .live-note.ok { color: #6ee7b7; }
@@ -177,7 +178,7 @@ body.page-pushed .app { will-change: transform; }
 .live-note.warn { color: #fcd34d; }
 .live-note .dot {
   width: 6px; height: 6px; border-radius: 50%; flex: none;
-  background: currentColor; opacity: .85;
+  background: currentColor; opacity: .85; margin-top: 5px;
 }
 .live-note.syncing .dot { animation: live-blink 1s ease-in-out infinite; }
 @keyframes live-blink { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }

@@ -72,7 +72,9 @@
      自检：浏览器直接访问 https://<域名>/ 应返回 {"ok":true,...}。
      修改本文件后，记得在 OSS / CDN 上刷新 index.html 的缓存。
      临时换代理可以不改文件，直接在网址后加参数：index.html?proxy=https%3A%2F%2F<域名> -->
-<script>window.LIVE_PROXY = 'https://lottery-proxy-utlmmbaooz.cn-shanghai.fcapp.run';</script>
+<!-- 云函数已删除，不再主动核对最新开奖；数据更新走 GitHub Actions 定时抓取（.github/workflows/update-data.yml）。
+     本地开发仍可用 serve.py 的同源 /api 代理自动核对。 -->
+<!-- <script>window.LIVE_PROXY = 'https://lottery-proxy-utlmmbaooz.cn-shanghai.fcapp.run';</script> -->
 <script src="js/live.js"></script>
 <script src="js/charts.js"></script>
 <script src="js/app.js"></script>
