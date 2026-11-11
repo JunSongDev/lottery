@@ -2566,7 +2566,8 @@
       : (res.fixed ? '修正 ' + res.fixed + ' 期' : '已是最新');
     // 标出这条数据是从哪条链路来的，便于判断"是不是走了本地代理"
     var via = res.via === 'proxy' ? '本地代理'
-      : (res.via === 'jsonp' ? 'JSONP' : (res.fromCache ? '会话缓存' : '官方接口'));
+      : (res.via === 'mirror' ? 'GitHub 镜像'
+      : (res.via === 'jsonp' ? 'JSONP' : (res.fromCache ? '会话缓存' : '官方接口')));
     return '<b>' + name + '</b> ' + tail + '（数据至 ' + d + ' · ' + via + '）';
   }
 
@@ -2594,10 +2595,14 @@
     renderHistList(true);
   }
 
-  // kinds 省略 = 双色球 + 大乐透一起核对。首次加载要保证两个玩法都拿到：
+  // kinds 省略 = 双色球 + 大乐透一起核对。提示条的取舍：
   //   · 谁先拿到就先把它用起来，不必等另一个（某个来源卡住也不会拖住整页）；
-  //   · 都拿到 → 提示条数秒后自动收起；
-  //   · 有玩法没拿到 → 提示常驻，并提供"只重试失败玩法"的入口。
+  //   · 都拿到 → "开奖核对完成"数秒后自动收起；
+  //   · 有玩法没核对上但数据已覆盖最近一期开奖 → 完全不出提示（徽章上的
+  //     "数据至"本来就是常驻的新鲜度指示，静态托管上核对不上但数据没过期
+  //     是常态，不必打扰）；
+  //   · 数据可能过期：无通道的玩法（未配代理且接口不开放跨域）温和提醒
+  //     "等定时任务更新"；有通道却失败的玩法提示常驻 + "只重试失败玩法"。
   function syncLive(kinds) {
     if (!window.LCLive || liveBusy) return;
     var list = kinds && kinds.length ? kinds : LIVE_KINDS.slice();
@@ -2638,21 +2643,33 @@
         return;
       }
 
-      // 虽没核对上，但本地数据已经覆盖到最近一期开奖（静态托管常见：
-      // 数据文件是发布/定时更新时最新的，只是页面联不上代理）→ 不必打扰用户
-      var fresh = fails.every(function (r) {
+      // 数据新鲜度分组：已覆盖最近一期开奖的失败不打扰——徽章上的"数据至"
+      // 本来就是常驻的新鲜度指示，提示条不必再念一遍（静态托管常见：
+      // 数据文件由定时任务保持在最新，页面核对不上但数据没过期）
+      var stale = [];
+      fails.forEach(function (r) {
         var need = window.LCLive.lastDrawDate ? window.LCLive.lastDrawDate(r.kind) : '';
         var d = LC.draws(r.kind).slice(-1)[0];
-        return !need || !d || String(d.d || '') >= need;
+        if (!need || !d || String(d.d || '') >= need) return;
+        stale.push(r);
       });
-      if (fresh) {
-        var stamps = fails.map(function (r) {
+      if (!stale.length) {
+        liveNote('');                      // 数据都是新的：清掉"正在核对…"，安静收场
+        return;
+      }
+
+      // 全部是"无通道"的玩法（未配置代理且接口不开放跨域，非 GitHub Pages 的
+      // 静态托管上双色球会这样）：不是故障，重试也无济于事 → 温和提醒即可
+      if (stale.every(function (r) { return r.errorKind === 'no-channel'; })) {
+        var stamps = stale.map(function (r) {
           var d = LC.draws(r.kind).slice(-1)[0];
-          return '<b>' + LC.cfg(r.kind).name + '</b> 数据至 ' + (d ? d.d : '—');
+          return '<b>' + LC.cfg(r.kind).name + '</b> 数据至 ' + (d ? d.d : '—') +
+            '（最近开奖日 ' +
+            ((window.LCLive.lastDrawDate && window.LCLive.lastDrawDate(r.kind)) || '—') + '）';
         }).join(' · ');
-        liveNote('本次没能联网核对（' + why + '），但数据已覆盖最近一期开奖：' + stamps +
-          '，可正常使用。若希望每次打开都实时核对，请配置远端代理' +
-          '（见 index.html 里的 <code>window.LIVE_PROXY</code>）。', 'warn', 15000);
+        liveNote(stamps + ' 可能已开出新一期：当前站点无法实时核对' +
+          '（该接口不开放跨域，也未配置远端代理）。数据由定时任务在开奖当晚自动更新，' +
+          '稍后刷新页面即可。', 'warn', 15000);
         return;
       }
 
@@ -2692,7 +2709,10 @@
         ' <button type="button" id="live-retry" class="live-retry">重试</button>' + hint, 'fail');
       var btn = $('#live-retry');
       if (btn) btn.addEventListener('click', function () {
-        syncLive(fails.map(function (r) { return r.kind; }));
+        // 只重试"有通道但失败了"的玩法；无通道的（未配代理且接口不开放跨域）
+        // 重试也不会有不同结果
+        syncLive(stale.filter(function (r) { return r.errorKind !== 'no-channel'; })
+          .map(function (r) { return r.kind; }));
       });
     }
 

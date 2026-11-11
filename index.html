@@ -72,11 +72,14 @@
      自检：浏览器直接访问 https://<域名>/ 应返回 {"ok":true,...}。
      修改本文件后，记得在 OSS / CDN 上刷新 index.html 的缓存。
      临时换代理可以不改文件，直接在网址后加参数：index.html?proxy=https%3A%2F%2F<域名> -->
-<!-- 云函数已删除，当前默认不主动核对最新开奖；数据更新走 GitHub Actions 定时抓取（.github/workflows/update-data.yml）。
-     本地开发仍可用 serve.py 的同源 /api 代理自动核对。
-     如需恢复"每次打开实时核对"：目前只有国内云函数可行（scripts/proxy_wsgi.py，
-     阿里云 FC / 腾讯云 SCF）。Cloudflare Workers 不行——实测福彩官网拦截其境外
-     出口 IP（取数 403），workers.dev 域名在大陆又有 DNS 污染，详见 cloudflare/README.md。 -->
+<!-- 核对链路（js/live.js）：① 本地 serve.py 的 /api 代理（本地开发）
+     ② 远端 LIVE_PROXY 云函数（如配置）③ 直连接口（仅体彩开放 CORS）
+     ④ jsDelivr 数据镜像（GitHub Pages 自动启用）：定时任务（.github/workflows/
+     update-data.yml）开奖当晚抓取并提交 data/*-head.json 后刷新 jsDelivr 缓存，
+     页面即可核对到最新入库的开奖（约开奖后 30~90 分钟），无需任何配置。
+     分钟级"真实时"核对目前只有国内云函数可行（scripts/proxy_wsgi.py）；
+     Cloudflare Workers 不行——实测福彩官网拦截其境外出口 IP（取数 403），
+     workers.dev 域名在大陆又被 DNS 污染，详见 cloudflare/README.md。 -->
 <!-- <script>window.LIVE_PROXY = 'https://lottery-proxy-utlmmbaooz.cn-shanghai.fcapp.run';</script> -->
 <script src="js/live.js"></script>
 <script src="js/charts.js"></script>

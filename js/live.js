@@ -10,7 +10,14 @@
  *      必备：这类站点只发文件、没有 /api，得把代理放到云函数上，
  *      靠它返回的 CORS 头取数（见 scripts/proxy_wsgi.py）；
  *   ③ 直连官方接口 fetch —— 仅在接口愿意返回 CORS 头时才可能成功
- *      （目前只有大乐透的 webapi.sporttery.cn 开放，双色球不行）。
+ *      （目前只有大乐透的 webapi.sporttery.cn 开放，双色球不行，
+ *      已标记 direct:false 彻底跳过直连）。
+ *   ④ GitHub 数据镜像（jsDelivr）—— 仅 GitHub Pages 启用：定时任务把最新数据
+ *      提交进仓库后主动刷新 jsDelivr 缓存（update-data.yml 最后一步），页面直接
+ *      拉开放 CORS 的 cdn.jsdelivr.net 上的 data/<kind>-head.json（最近 30 期
+ *      轻量头文件，约 3KB），能核对出"已入库"的新开奖（约开奖后 30~90 分钟）。
+ *      实测大陆网络对 jsDelivr 可达性良好（raw.githubusercontent.com 被 DNS
+ *      污染不可用）；镜像失败按尽力而为处理：短超时、不重试、静默降级。
  *
  * 实测（2026-09）：
  *   · 中彩网 jc.zhcw.com/port/client_json.php 已彻底不可用（带不带 Referer 都返回
@@ -39,6 +46,7 @@
   var TIMEOUT = 8000;                   // 单次请求超时（毫秒）
   var MAX_TRIES = 3;                    // 单个玩法最多尝试次数（首次 + 2 次重试）
   var RETRY_DELAY = [600, 1800];        // 第 2、3 次尝试前的等待（毫秒）
+  var MIRROR_TIMEOUT = 5000;            // 镜像源专用短超时：尽力而为，不拖慢页面
   // 以 file:// 直接打开时：浏览器不发 Referer（中彩网要 Referer 才返数据），
   // 又会拦截跨域（体彩接口只允许 fetch 不允许 JSONP），两个来源都拿不到，
   // 这时只尝试一次，把"需要本地服务"这件事尽快反馈给用户。
@@ -104,8 +112,12 @@
     ssq: {
       label: '中国福利彩票官网',
       proxy: '/api/ssq',    // 本地 serve.py 的同源代理（服务端取数，无跨域问题）
-      // 直连源：接口本身有效，但不返回 CORS 头，浏览器 fetch 会被拦，
-      // 所以实际只有同源代理这条路走得通（保留直连是为了 http(s) 部署时也能尝试）
+      // 福彩官网不返回 CORS 头、也不支持 JSONP，浏览器直连注定被拦
+      // （实测同请求头国内直连能拿到 200，但响应没有 Access-Control-Allow-Origin）。
+      // direct:false = 页面不再发这记注定失败的直连请求，公网页面的控制台
+      // 不会再挂一条红 CORS 错误；取数只走代理（本地 /api 或远端 LIVE_PROXY）。
+      direct: false,
+      mirror: true,         // jsDelivr 数据镜像（GitHub Pages 启用），见 mirrorUrl()
       url: function () {
         return 'https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice' +
           '?name=ssq&issueCount=' + WINDOW_ROWS + '&pageNo=1&pageSize=' +
@@ -131,6 +143,7 @@
           '?gameNo=85&provinceId=0&pageSize=' + WINDOW_ROWS + '&isVerify=1&pageNo=1';
       },
       jsonp: false,         // 该接口不支持 callback，只能 fetch
+      mirror: true,         // 直连失败时的兜底：核对"定时任务已入库"的数据
       parse: function (json) {
         var list = (json && json.value && json.value.list) || [];
         return list.map(function (x) {
@@ -311,7 +324,22 @@
     } catch (e) { return true; }
   }
 
-  // 取数：同源代理 → 远端代理 → 直连 fetch →（可选）JSONP
+  // GitHub Pages 项目页（https://<owner>.github.io/<repo>/…）→ jsDelivr 镜像地址。
+  // jsDelivr 对任意来源返回 Access-Control-Allow-Origin:*，大陆网络可达性实测良好
+  // （raw.githubusercontent.com 被 DNS 污染为 0.0.0.0，不可用）。
+  // 其他托管环境（自定义域名 / OSS / 本地 / file://）返回空串：不启用镜像源。
+  function mirrorUrl(kind) {
+    try {
+      var host = (root.location && root.location.hostname) || '';
+      if (!/\.github\.io$/.test(host)) return '';
+      var segs = String((root.location && root.location.pathname) || '/').split('/').filter(Boolean);
+      if (!segs.length) return '';
+      return 'https://cdn.jsdelivr.net/gh/' + host.split('.')[0] + '/' + segs[0] +
+        '@master/data/' + kind + '-head.json';
+    } catch (e) { return ''; }
+  }
+
+  // 取数：同源代理 → 远端代理 → 直连 fetch →（可选）JSONP →（GitHub Pages）jsDelivr 镜像
   function pull(kind, src) {
     var base = remoteBase();
     var local = localProxyUsable();
@@ -320,19 +348,56 @@
     var queue = [];
     if (base) queue.push(function () { return proxyRows(base + '/' + kind, true); });
     if (local) queue.push(function () { return proxyRows(src.proxy, false); });
-    queue.push(function () {
-      return getJson(src.url(), TIMEOUT).then(function (json) {
-        return { json: json, via: 'direct' };
-      });
-    });
-    // file:// 下浏览器不发 Referer，JSONP（script 标签）同样拿不到数据，
-    // 没必要再空等一次 8 秒超时
-    if (src.jsonp && !FILE_MODE) {
+    // 直连 fetch 只对开放 CORS 的接口有意义（目前只有大乐透的体彩接口）；
+    // direct:false 的源（双色球）不再浪费这记注定被浏览器拦截的请求
+    if (src.direct !== false) {
       queue.push(function () {
-        return jsonp(src.url(), TIMEOUT).then(function (json) {
-          return { json: json, via: 'jsonp' };
+        return getJson(src.url(), TIMEOUT).then(function (json) {
+          return { json: json, via: 'direct' };
         });
       });
+      // file:// 下浏览器不发 Referer，JSONP（script 标签）同样拿不到数据，
+      // 没必要再空等一次 8 秒超时
+      if (src.jsonp && !FILE_MODE) {
+        queue.push(function () {
+          return jsonp(src.url(), TIMEOUT).then(function (json) {
+            return { json: json, via: 'jsonp' };
+          });
+        });
+      }
+    }
+    // 数据镜像源：jsDelivr 上的轻量头文件（最近 30 期，约 3KB）。定时任务
+    // 提交新数据后会主动 purge jsDelivr 缓存，所以它能第一时间核对出"已入库"
+    // 的新开奖。尽力而为：5 秒短超时、失败不重试（err.mirror 标记）、静默降级，
+    // 网络不通时多等的最多 5 秒换一次有价值的核对机会，值得。
+    if (src.mirror) {
+      var mu = mirrorUrl(kind);
+      if (mu) {
+        queue.push(function () {
+          return getJson(mu, MIRROR_TIMEOUT).then(function (json) {
+            var rows = (json && json.draws) || [];
+            if (!rows.length) throw new Error('镜像数据为空');
+            return { rows: rows, via: 'mirror', label: 'GitHub 数据镜像', mirror: true };
+          }, function (err) {
+            err = err || new Error('镜像请求失败');
+            err.mirror = true;
+            // fetch 失败会被 getJson 归因成 CORS 拦截，对 jsDelivr 是误导
+            // （它本来就开放 CORS，失败只是网络不可达）
+            if (err.cors) err.message = '无法连接数据镜像（网络不可达）';
+            throw err;
+          });
+        });
+      }
+    }
+    if (!queue.length) {
+      // 公网静态托管（非 GitHub Pages）+ 未配置代理 + 接口不开放跨域：
+      // 根本没有可行通道（GitHub Pages 有上面的镜像源兜底）。这不是网络故障，
+      // 重试也不会有不同结果——如实报告（no-channel），提示条据此给
+      // "定时任务会自动更新"的温和指引，而不是空转重试
+      var e0 = new Error('该接口不开放跨域（无 CORS 头），当前站点也没有可用的代理');
+      e0.noChannel = true;
+      e0.fatal = true;
+      return Promise.reject(e0);
     }
     return firstOf(queue, function (err) {
       if (!err) return;
@@ -363,7 +428,7 @@
     function next() {
       return once().then(null, function (err) {
         if (err) err.tries = tries;           // 记录实际尝试次数，供提示条如实说明
-        if (err && err.fatal) throw err;      // 环境问题（无代理 / 被拦），重试没意义
+        if (err && (err.fatal || err.mirror)) throw err;   // 环境问题 / 镜像尽力而为，重试没意义
         if (tries >= tryLimit()) throw err;
         var wait = RETRY_DELAY[Math.min(tries - 1, RETRY_DELAY.length - 1)];
         return new Promise(function (resolve, reject) {
@@ -508,8 +573,10 @@
         error: (err && err.message) || '未知错误',
         // 代理本身为什么不可用（HTTP 404 / 未部署 …），供提示条如实说明
         proxyError: (err && err.proxyError) || null,
-        // no-proxy：没有可用代理；cors：浏览器拦掉了跨域响应
-        errorKind: err && err.noProxy ? 'no-proxy' : (err && err.cors ? 'cors' : 'other'),
+        // no-channel：根本没有可行通道（接口不开放跨域 + 未配置代理）；
+        // no-proxy：有代理通道但不可用；cors：浏览器拦掉了跨域响应
+        errorKind: err && err.noChannel ? 'no-channel'
+          : err && err.noProxy ? 'no-proxy' : (err && err.cors ? 'cors' : 'other'),
         at: Date.now()
       });
     });

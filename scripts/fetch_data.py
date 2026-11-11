@@ -12,6 +12,8 @@
 
 产物：
   - data/ssq.json, data/dlt.json           原始 JSON
+  - data/ssq-head.json, data/dlt-head.json 最近 30 期轻量头文件（约 3KB），
+                                           供页面经 jsDelivr 镜像核对（js/live.js）
   - js/data-ssq.js, js/data-dlt.js         供 H5 以 <script> 直接加载（支持 file:// 打开）
 
 用法：
@@ -198,6 +200,13 @@ def write_outputs(kind, meta, draws):
 
     with open(os.path.join(ROOT, "data", kind + ".json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+
+    # 轻量头文件：GitHub Pages 打开页面时经 jsDelivr（开放 CORS）拉取它做
+    # "数据镜像"核对。只放最近 30 期（约 3KB），每页访问的流量开销可忽略；
+    # jsDelivr 的 12 小时边缘缓存由工作流在提交后主动 purge 刷新。
+    with open(os.path.join(ROOT, "data", kind + "-head.json"), "w", encoding="utf-8") as f:
+        json.dump({"kind": kind, "updated": draws[-1]["d"], "draws": draws[-30:]},
+                  f, ensure_ascii=False, separators=(",", ":"))
 
     compact = ",".join(
         '["%s","%s",[%s],[%s]]' % (d["i"], d["d"], ",".join(map(str, d["r"])), ",".join(map(str, d["b"])))

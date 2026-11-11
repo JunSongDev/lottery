@@ -55,6 +55,16 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add data/ssq.json data/dlt.json js/data-ssq.js js/data-dlt.js
+          git add data/ssq.json data/dlt.json data/ssq-head.json data/dlt-head.json js/data-ssq.js js/data-dlt.js
           git diff --cached --quiet || git commit -m 'chore(data): 自动更新开奖数据'
           git push
+
+      # 提交后立刻让 jsDelivr 的 12 小时边缘缓存失效，页面打开时的
+      # "数据镜像"核对源（js/live.js，走 cdn.jsdelivr.net，开放 CORS）
+      # 才能马上看到新开奖
+      - name: 刷新 jsDelivr 镜像缓存
+        continue-on-error: true
+        run: |
+          curl -sf -m 15 "https://purge.jsdelivr.net/gh/JunSongDev/lottery@master/data/ssq-head.json" || true
+          curl -sf -m 15 "https://purge.jsdelivr.net/gh/JunSongDev/lottery@master/data/dlt-head.json" || true
+          echo "jsDelivr 缓存已请求刷新（purge 是否成功见上方 curl 输出）"
