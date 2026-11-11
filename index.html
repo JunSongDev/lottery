@@ -74,8 +74,9 @@
      临时换代理可以不改文件，直接在网址后加参数：index.html?proxy=https%3A%2F%2F<域名> -->
 <!-- 云函数已删除，当前默认不主动核对最新开奖；数据更新走 GitHub Actions 定时抓取（.github/workflows/update-data.yml）。
      本地开发仍可用 serve.py 的同源 /api 代理自动核对。
-     如需恢复"每次打开实时核对"：部署 cloudflare/worker.js（Cloudflare Workers，免费、无需绑卡、
-     无需备案，部署与自检步骤见 cloudflare/README.md），然后打开下面这行并填入你的地址。 -->
+     如需恢复"每次打开实时核对"：目前只有国内云函数可行（scripts/proxy_wsgi.py，
+     阿里云 FC / 腾讯云 SCF）。Cloudflare Workers 不行——实测福彩官网拦截其境外
+     出口 IP（取数 403），workers.dev 域名在大陆又有 DNS 污染，详见 cloudflare/README.md。 -->
 <!-- <script>window.LIVE_PROXY = 'https://lottery-proxy-utlmmbaooz.cn-shanghai.fcapp.run';</script> -->
 <script src="js/live.js"></script>
 <script src="js/charts.js"></script>
