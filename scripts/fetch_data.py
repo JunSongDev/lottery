@@ -4,9 +4,11 @@
 历史开奖数据抓取脚本（零第三方依赖）
 
 数据源：
-  - 双色球：500 彩票网历史开奖表格（2003 年首期至今）
-  - 大乐透：500 彩票网历史开奖表格（2007 年首期至今）
-  - 交叉校验：中国福利彩票官网 / 中国体育彩票官网 最新期
+  - 双色球：500 彩票网历史开奖表格（2003 年首期至今）—— 主源
+  - 大乐透：500 彩票网历史开奖表格（2007 年首期至今）—— 主源
+  - 交叉校验（尽力而为）：中国福利彩票官网 / 中国体育彩票官网 最新 30 期。
+    官网防火墙可能拦截境外机房 IP（实测 2026-11-11：cwl.gov.cn 对 Cloudflare
+    出口返回 403），GitHub Actions 上官网不可达时自动跳过校验、只用 500 数据。
 
 产物：
   - data/ssq.json, data/dlt.json           原始 JSON
@@ -105,8 +107,13 @@ def to7(issue):
     return issue
 
 
-def fetch_full(kind, end):
-    """抓取 500 彩票网全量历史，end 为该玩法最新的 5 位期号（如 26105）"""
+def fetch_full(kind, end="29999"):
+    """抓取 500 彩票网全量历史。
+
+    end 直接传一个足够大的期号即可：history.php 返回 start~end 之间实际
+    存在的所有期，因此无需先问官方接口"最新一期是多少"——官方接口在境外
+    机房（GitHub Actions）可能被防火墙拦截，不能作为流程的前置依赖。
+    """
     if kind == "ssq":
         url = ("https://datachart.500.com/ssq/history/newinc/history.php"
                "?start=03001&end=%s" % end)
@@ -153,6 +160,17 @@ def fetch_sporttery_latest(tries=3, timeout=60):
             "b": sorted(nums[5:]),
         })
     return rows
+
+
+def try_latest(fn, label, tries=2, timeout=30):
+    """官方接口只做交叉校验，拿不到就跳过——境外机房（GitHub Actions）的 IP
+    可能被官网防火墙拦截（实测 cwl.gov.cn 对 Cloudflare 出口返回 403），
+    500 彩票网才是主源，官网不可达不应让整个任务失败。"""
+    try:
+        return fn(tries=tries, timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        print("  [警告] %s 不可达（%s），跳过官方交叉校验" % (label, e))
+        return None
 
 
 def merge(rows, latest, label):
@@ -209,11 +227,12 @@ def main():
     print("开始抓取历史开奖数据 ...")
 
     print("[1/2] 双色球")
-    cwl = fetch_cwl_latest()
-    print("  官网最新期号 %s" % cwl[0]["i"])
-    ssq = fetch_full("ssq", cwl[0]["i"][2:])
+    ssq = fetch_full("ssq")
     print("  500彩票网返回 %d 期" % len(ssq))
-    ssq = merge(ssq, cwl, "双色球")
+    cwl = try_latest(fetch_cwl_latest, "福彩官网")
+    if cwl:
+        print("  官网最新期号 %s" % cwl[0]["i"])
+        ssq = merge(ssq, cwl, "双色球")
     write_outputs("ssq", {
         "name": "双色球", "mainMin": 1, "mainMax": 33, "mainCount": 6,
         "specialMin": 1, "specialMax": 16, "specialCount": 1,
@@ -222,11 +241,12 @@ def main():
     }, ssq)
 
     print("[2/2] 大乐透")
-    sport = fetch_sporttery_latest()
-    print("  官网最新期号 %s" % sport[0]["i"])
-    dlt = fetch_full("dlt", sport[0]["i"][2:])
+    dlt = fetch_full("dlt")
     print("  500彩票网返回 %d 期" % len(dlt))
-    dlt = merge(dlt, sport, "大乐透")
+    sport = try_latest(fetch_sporttery_latest, "体彩官网")
+    if sport:
+        print("  官网最新期号 %s" % sport[0]["i"])
+        dlt = merge(dlt, sport, "大乐透")
     write_outputs("dlt", {
         "name": "超级大乐透", "mainMin": 1, "mainMax": 35, "mainCount": 5,
         "specialMin": 1, "specialMax": 12, "specialCount": 2,
