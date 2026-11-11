@@ -17,8 +17,28 @@
    `junsong`），点 **Deploy** 部署默认代码。
 4. 部署完点 **Edit code**：把编辑器里的模板代码**全选删除**，把
    `worker.js` 的内容**整份粘贴**进去 → 右上角 **Deploy** → Confirm。
+
+   > ★ 常见报错：粘贴后提示 `File system provider for cfs:/... is not available`
+   > —— 这是 Cloudflare 在线编辑器在 **Safari** 下的兼容问题（浏览器内
+   > 虚拟文件系统初始化失败），与代码无关。**换 Chrome 或 Edge** 打开
+   > dash.cloudflare.com 重做第 4 步即可；粘贴时贴进编辑器默认打开的那个
+   > 文件（不要自己新建文件）。还不行就走下面的「方案 B：命令行部署」。
+
 5. 回到 Worker 概览页，顶部能看到你的地址，形如
    `https://lottery-proxy.<你的子域>.workers.dev`。
+
+### 方案 B：命令行部署（编辑器打不开时用）
+
+在项目目录的 `cloudflare/` 下执行（需要 Node.js，没有就
+`brew install node`；首次会问登录，浏览器里点 Allow）：
+
+```bash
+cd cloudflare
+npx wrangler login      # 只需一次；会自动打开浏览器授权
+npx wrangler deploy     # 按 wrangler.toml 把 worker.js 部署上去
+```
+
+部署完同样输出 `https://lottery-proxy.<你的子域>.workers.dev` 的地址。
 
 ## 自检（重要，必须实测）
 

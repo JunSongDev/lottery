@@ -1,0 +1,5 @@
+# Cloudflare Workers 部署配置（配合命令行方案 B 使用）
+# 部署：在本目录执行 npx wrangler deploy
+name = "lottery-proxy"
+main = "worker.js"
+compatibility_date = "2026-01-01"
